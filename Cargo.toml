@@ -1,0 +1,5 @@
+[workspace]
+resolver = "3"
+members = ["sqllineage", "sqllineage-python"]
+default-members = ["sqllineage"]
+

@@ -1,0 +1,22 @@
+/target
+Cargo.lock
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+.venv/
+*.so
+*.dylib
+*.dll
+
+# Nix / direnv
+.direnv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
