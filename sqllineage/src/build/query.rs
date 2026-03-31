@@ -4,7 +4,6 @@ use crate::build::LineageBuilder;
 use crate::graph::edge::RawEdge;
 use crate::graph::node::NodeId;
 use crate::graph::scope::{Binding, ScopeKind};
-use crate::types::WarningKind;
 
 impl LineageBuilder {
     pub(crate) fn visit_query(&mut self, query: &Query) {
@@ -35,7 +34,6 @@ impl LineageBuilder {
         self.visit_set_expr(&query.body);
 
         if has_ctes {
-            // Propagate output columns to parent (CTE-registration) scope
             let body_outputs: Vec<_> = self
                 .graph
                 .scopes
@@ -54,7 +52,6 @@ impl LineageBuilder {
                 self.visit_select(select);
             }
             SetExpr::SetOperation { left, right, .. } => {
-                // Process left side in its own scope
                 let left_scope = self.push_scope(ScopeKind::SetOperation);
                 self.visit_set_expr(left);
                 let left_outputs: Vec<(String, NodeId)> = self
@@ -66,7 +63,6 @@ impl LineageBuilder {
                     .collect();
                 self.pop_scope();
 
-                // Process right side in its own scope
                 let right_scope = self.push_scope(ScopeKind::SetOperation);
                 self.visit_set_expr(right);
                 let right_outputs: Vec<(String, NodeId)> = self
@@ -80,7 +76,6 @@ impl LineageBuilder {
 
                 let is_recursive = self.recursive_cte_name.is_some();
 
-                // Positional merge: redirect right's incoming edges to left's output nodes
                 let pair_count = left_outputs.len().min(right_outputs.len());
                 for i in 0..pair_count {
                     let left_out = left_outputs[i].1;
@@ -104,7 +99,6 @@ impl LineageBuilder {
                     }
                 }
 
-                // Register left's outputs as this scope's output columns
                 for (name, node_id) in &left_outputs {
                     self.graph.scopes.add_output_column(
                         self.current_scope,
@@ -118,13 +112,13 @@ impl LineageBuilder {
             SetExpr::Query(q) => {
                 self.visit_query(q);
             }
-            SetExpr::Values(_) => {}
-            SetExpr::Update(stmt) | SetExpr::Insert(stmt) => {
+            SetExpr::Values(_) | SetExpr::Table(_) => {}
+            SetExpr::Update(stmt)
+            | SetExpr::Insert(stmt)
+            | SetExpr::Delete(stmt)
+            | SetExpr::Merge(stmt) => {
                 let st = self.visit_statement(stmt);
                 self.inner_statement_type = Some(st);
-            }
-            other => {
-                self.warn(WarningKind::UnhandledExpression(format!("{other:?}")));
             }
         }
     }

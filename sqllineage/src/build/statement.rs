@@ -155,7 +155,131 @@ impl LineageBuilder {
                 StatementType::Merge
             }
 
-            _ => StatementType::Other,
+            // Statements that do not carry data lineage.
+            Statement::AlterConnector { .. }
+            | Statement::AlterIndex { .. }
+            | Statement::AlterOperator { .. }
+            | Statement::AlterOperatorClass { .. }
+            | Statement::AlterOperatorFamily { .. }
+            | Statement::AlterPolicy { .. }
+            | Statement::AlterRole { .. }
+            | Statement::AlterSchema { .. }
+            | Statement::AlterSession { .. }
+            | Statement::AlterTable { .. }
+            | Statement::AlterType { .. }
+            | Statement::AlterUser { .. }
+            | Statement::AlterView { .. }
+            | Statement::Analyze { .. }
+            | Statement::Assert { .. }
+            | Statement::AttachDatabase { .. }
+            | Statement::AttachDuckDBDatabase { .. }
+            | Statement::Cache { .. }
+            | Statement::Call(_)
+            | Statement::Case(_)
+            | Statement::Close { .. }
+            | Statement::Comment { .. }
+            | Statement::Commit { .. }
+            | Statement::Copy { .. }
+            | Statement::CopyIntoSnowflake { .. }
+            | Statement::CreateConnector { .. }
+            | Statement::CreateDatabase { .. }
+            | Statement::CreateDomain { .. }
+            | Statement::CreateExtension { .. }
+            | Statement::CreateFunction { .. }
+            | Statement::CreateIndex(_)
+            | Statement::CreateMacro { .. }
+            | Statement::CreateOperator { .. }
+            | Statement::CreateOperatorClass { .. }
+            | Statement::CreateOperatorFamily { .. }
+            | Statement::CreatePolicy { .. }
+            | Statement::CreateProcedure { .. }
+            | Statement::CreateRole { .. }
+            | Statement::CreateSchema { .. }
+            | Statement::CreateSecret { .. }
+            | Statement::CreateSequence { .. }
+            | Statement::CreateServer { .. }
+            | Statement::CreateStage { .. }
+            | Statement::CreateTrigger { .. }
+            | Statement::CreateType { .. }
+            | Statement::CreateUser { .. }
+            | Statement::CreateView { .. }
+            | Statement::CreateVirtualTable { .. }
+            | Statement::Deallocate { .. }
+            | Statement::Declare { .. }
+            | Statement::Deny { .. }
+            | Statement::DetachDuckDBDatabase { .. }
+            | Statement::Directory { .. }
+            | Statement::Discard { .. }
+            | Statement::Drop { .. }
+            | Statement::DropConnector { .. }
+            | Statement::DropDomain { .. }
+            | Statement::DropExtension { .. }
+            | Statement::DropFunction { .. }
+            | Statement::DropOperator { .. }
+            | Statement::DropOperatorClass { .. }
+            | Statement::DropOperatorFamily { .. }
+            | Statement::DropPolicy { .. }
+            | Statement::DropProcedure { .. }
+            | Statement::DropSecret { .. }
+            | Statement::DropTrigger { .. }
+            | Statement::Execute { .. }
+            | Statement::Explain { .. }
+            | Statement::ExplainTable { .. }
+            | Statement::ExportData { .. }
+            | Statement::Fetch { .. }
+            | Statement::Flush { .. }
+            | Statement::Grant { .. }
+            | Statement::If(_)
+            | Statement::Install { .. }
+            | Statement::Kill { .. }
+            | Statement::LISTEN { .. }
+            | Statement::List(_)
+            | Statement::Load { .. }
+            | Statement::LoadData { .. }
+            | Statement::Lock { .. }
+            | Statement::LockTables { .. }
+            | Statement::Msck { .. }
+            | Statement::NOTIFY { .. }
+            | Statement::Open(_)
+            | Statement::OptimizeTable { .. }
+            | Statement::Pragma { .. }
+            | Statement::Prepare { .. }
+            | Statement::Print(_)
+            | Statement::RaisError { .. }
+            | Statement::Raise { .. }
+            | Statement::ReleaseSavepoint { .. }
+            | Statement::Remove { .. }
+            | Statement::RenameTable { .. }
+            | Statement::Reset { .. }
+            | Statement::Return(_)
+            | Statement::Revoke { .. }
+            | Statement::Rollback { .. }
+            | Statement::Savepoint { .. }
+            | Statement::Set(_)
+            | Statement::ShowCharset { .. }
+            | Statement::ShowCollation { .. }
+            | Statement::ShowColumns { .. }
+            | Statement::ShowCreate { .. }
+            | Statement::ShowDatabases { .. }
+            | Statement::ShowFunctions { .. }
+            | Statement::ShowObjects { .. }
+            | Statement::ShowSchemas { .. }
+            | Statement::ShowStatus { .. }
+            | Statement::ShowTables { .. }
+            | Statement::ShowVariable { .. }
+            | Statement::ShowVariables { .. }
+            | Statement::ShowViews { .. }
+            | Statement::StartTransaction { .. }
+            | Statement::Throw { .. }
+            | Statement::Truncate { .. }
+            | Statement::UNCache { .. }
+            | Statement::UNLISTEN { .. }
+            | Statement::Unload { .. }
+            | Statement::UnlockTables { .. }
+            | Statement::Use(_)
+            | Statement::Vacuum { .. }
+            | Statement::WaitFor { .. }
+            | Statement::While { .. } => StatementType::Other,
         }
     }
 

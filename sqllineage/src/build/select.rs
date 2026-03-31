@@ -113,10 +113,8 @@ impl LineageBuilder {
             TableFactor::Table { name, alias, .. } => {
                 let table_ref = self.table_ref_from_object_name(name);
 
-                // Check for recursive CTE self-reference
                 let is_self_ref = self.recursive_cte_name.as_deref() == Some(&*table_ref.table);
 
-                // Check if this name is already a CTE or DerivedTable binding
                 let existing = self
                     .graph
                     .scopes
@@ -169,7 +167,16 @@ impl LineageBuilder {
                 let _ = alias;
             }
 
-            _ => {}
+            TableFactor::TableFunction { .. }
+            | TableFactor::Function { .. }
+            | TableFactor::UNNEST { .. }
+            | TableFactor::JsonTable { .. }
+            | TableFactor::OpenJsonTable { .. }
+            | TableFactor::Pivot { .. }
+            | TableFactor::Unpivot { .. }
+            | TableFactor::MatchRecognize { .. }
+            | TableFactor::XmlTable { .. }
+            | TableFactor::SemanticView { .. } => {}
         }
     }
 }

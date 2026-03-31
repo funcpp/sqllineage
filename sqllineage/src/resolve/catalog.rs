@@ -2,7 +2,6 @@ use crate::types::{CatalogProvider, ColumnMapping, ColumnOrigin, ColumnRef, Tran
 
 /// Apply `CatalogProvider` to refine unresolved column origins.
 pub(crate) fn apply_catalog(mappings: &mut Vec<ColumnMapping>, catalog: &dyn CatalogProvider) {
-    // Pass 1: resolve Ambiguous sources
     for mapping in mappings.iter_mut() {
         for source in &mut mapping.sources {
             if let ColumnOrigin::Ambiguous { column, candidates } = source
@@ -16,7 +15,6 @@ pub(crate) fn apply_catalog(mappings: &mut Vec<ColumnMapping>, catalog: &dyn Cat
         }
     }
 
-    // Pass 2: expand Wildcard sources into per-column mappings
     let mut expanded = Vec::new();
     let mut to_remove = Vec::new();
 

@@ -160,14 +160,8 @@ pub struct Warning {
 /// The kind of warning.
 #[derive(Debug, Clone, Serialize)]
 pub enum WarningKind {
-    /// An AST expression variant was not handled.
-    UnhandledExpression(String),
-    /// A statement type was not handled.
-    UnhandledStatement(String),
     /// Cycle detected in lineage graph after back-edge removal.
     UnexpectedCycle,
-    /// Column could not be resolved to a single table.
-    AmbiguousColumn { column: String },
 }
 
 /// Source location in the SQL string.

@@ -5,7 +5,7 @@ pub(crate) mod statement;
 
 use crate::graph::RawGraph;
 use crate::graph::scope::{Binding, ScopeId, ScopeKind, ScopeTree};
-use crate::types::{StatementType, Warning, WarningKind};
+use crate::types::{StatementType, Warning};
 use sqlparser::ast::Statement;
 
 pub(crate) struct LineageBuilder {
@@ -31,7 +31,6 @@ impl LineageBuilder {
         }
     }
 
-    /// Build lineage for a single statement. Returns the graph, warnings, and statement type.
     pub fn build(mut self, stmt: &Statement) -> (RawGraph, Vec<Warning>, StatementType) {
         let st = self.visit_statement(stmt);
         let final_type = self.inner_statement_type.unwrap_or(st);
@@ -54,12 +53,5 @@ impl LineageBuilder {
         self.graph
             .scopes
             .add_binding(self.current_scope, name, binding);
-    }
-
-    pub(crate) fn warn(&mut self, kind: WarningKind) {
-        self.warnings.push(Warning {
-            kind,
-            location: None,
-        });
     }
 }

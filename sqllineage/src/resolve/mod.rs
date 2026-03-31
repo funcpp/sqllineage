@@ -96,7 +96,6 @@ pub(crate) fn resolve(
         }
     }
 
-    // Sort by original output_column order (O(k + m log m))
     let name_order: HashMap<String, usize> = ordered_cols
         .iter()
         .enumerate()
@@ -403,7 +402,6 @@ fn resolve_from_bindings(
             column: name.to_string(),
         })
     } else {
-        // Single pass: check CTE matches and collect Table candidates together
         let mut table_candidates = Vec::new();
         for (_, binding) in bindings {
             match binding {

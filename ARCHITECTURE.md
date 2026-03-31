@@ -1,7 +1,6 @@
 # Architecture
 
-This document describes how sqllineage is structured and how to navigate
-the codebase. It is intended for contributors and anyone reading the source.
+How sqllineage is structured and how to navigate the codebase.
 
 ## Overview
 
@@ -22,82 +21,85 @@ Each statement is processed independently with its own graph and scope tree.
 
 ## Build phase
 
-`build/statement.rs` is the entry point. It pattern-matches on the sqlparser
-`Statement` enum to identify the output table and delegate to the appropriate
-handler. INSERT, CTAS, UPDATE, DELETE, and MERGE each have specific logic for
-extracting column-level assignments.
+`build/statement.rs` dispatches on the sqlparser `Statement` enum. Six
+variants carry lineage (Query, Insert, CreateTable, Update, Delete, Merge);
+all others produce `StatementType::Other`.
 
-`build/query.rs` handles `Query` — first processing any CTEs (each gets its
-own scope with bindings registered in the parent), then the query body. UNION
-is handled by giving each side its own scope and merging output columns
-positionally. `SetExpr::Update` / `SetExpr::Insert` (for CTE-wrapped DML
-like `WITH ... UPDATE`) delegates back to statement dispatch.
+`build/query.rs` handles CTEs and set operations. CTEs are registered as
+scope bindings in the parent scope; the query body runs in a child scope
+to prevent CTE names from interfering with FROM bindings. UNION sides each
+get their own scope; outputs are merged positionally. Recursive CTE
+self-references are detected via `recursive_cte_name`, and edges from the
+recursive step are marked with `is_recursive_back_edge`. CTE-wrapped DML
+(`WITH ... UPDATE`, `WITH ... DELETE`, etc.) is handled via
+`SetExpr::Update/Insert/Delete/Merge` delegation.
 
-`build/select.rs` processes a `SELECT`: FROM first (registering bindings),
-then projection (creating Output nodes). When a FROM item is a CTE reference,
-the existing CTE binding is reused instead of creating a new Table binding.
-Anonymous (alias-less) derived tables are tracked on the scope separately.
+`build/select.rs` processes FROM first (registering bindings), then
+projection (creating Output nodes). When a FROM item references a CTE,
+the existing binding is reused — this requires a `lookup()` call during
+Phase 1 to avoid adding CTE names to `tables.inputs`. Alias-less derived
+tables are tracked separately on the scope because they have no name to
+use as a binding key.
 
-`build/expr.rs` recursively walks expressions to collect leaf column
-references. Window function PARTITION BY / ORDER BY clauses are included
-as ancestors.
-
-### Graph and scope structures
-
-`graph/node.rs` defines four node types: Output (projection result), Ref
-(qualified column like `t.col`), Unqualified (bare column name), and Star
-(`SELECT *`).
-
-`graph/scope.rs` models SQL name resolution. Each scope holds a map of
-bindings (Table, Cte, or DerivedTable) and a list of output columns. Lookup
-walks the parent chain with nearest-scope-wins shadowing. CTE body scopes
-are separated from CTE registration scopes to prevent false ambiguity.
+`build/expr.rs` matches all `Expr` variants exhaustively — no catch-all.
+New variants added by sqlparser will cause a compile error, ensuring
+lineage is never silently lost.
 
 ## Resolve phase
 
-`resolve/mod.rs` iterates the root scope's output columns and resolves each
-one. Named columns resolve through scope lookup: Table bindings produce
-`Concrete` origins, CTE/DerivedTable bindings follow through `output_columns`
-to the base table recursively. Star nodes go through the same chain via
-`expand_star()`.
+`resolve/mod.rs` iterates the root scope's output columns. Named columns
+resolve via scope lookup: Table bindings produce `Concrete` origins,
+CTE/DerivedTable bindings follow through `output_columns` to the base
+table recursively. Star nodes go through the same chain via `expand_star()`.
 
-Every resolve path must handle all three binding types (Table, Cte,
-DerivedTable) uniformly. This is the most important invariant in the
-codebase — past bugs came from paths that only handled `Binding::Table`.
+Every resolve path handles all three binding types (Table, Cte, DerivedTable)
+uniformly.
 
 `resolve/topo.rs` validates that the graph is a DAG after removing recursive
 CTE back-edges. `resolve/catalog.rs` applies the optional `CatalogProvider`
 as a post-processing step.
 
+## False positives
+
+Two cases produce sources that may not contribute at runtime:
+
+- **Conditional branches.** `CASE WHEN flag THEN a ELSE b END` includes
+  both `a` and `b`. If `flag` is always true, `b` is a false positive.
+- **Opaque functions.** `my_udf(a, b)` includes both arguments even if
+  the function internally uses only `a`.
+
+These are inherent to static analysis. Any other false positive is a bug.
+
+## Limitations
+
+- `SELECT *` and unqualified columns in multi-table scopes require a
+  `CatalogProvider` for full resolution.
+- `PIVOT`/`UNPIVOT` are not yet handled — output columns are generated
+  dynamically from literal values, requiring semantic interpretation
+  beyond AST traversal.
+
 ## Upgrading sqlparser
 
-When sqlparser adds new `Statement` or `Expr` variants, the build layer
-may need updating:
-
-- New `Statement` variant → add a match arm in `statement.rs` (or let
-  it fall through to `StatementType::Other` if it carries no lineage).
-- New `Expr` variant → add a match arm in `expr.rs` (the catch-all
-  emits `WarningKind::UnhandledExpression`).
-- Renamed/restructured fields → follow compiler errors.
-
-If sqlparser already parses a construct, sqllineage generally handles it
-automatically through the existing AST traversal. Changes to sqllineage
-itself should only be needed when sqlparser's representation changes.
+All sqlparser enums (`Statement`, `Expr`, `SetExpr`, `TableFactor`,
+`SelectItem`) are matched exhaustively — no catch-all arms. New variants
+will cause a compile error. For each new variant, determine whether it
+carries column references (add traversal) or is lineage-neutral (return
+empty / `StatementType::Other`).
 
 ## Module map
 
 | Path | Responsibility |
 |------|---------------|
 | `lib.rs` | `pub fn analyze()` — parses SQL, runs build+resolve per statement |
-| `types.rs` | All public types: `AnalyzeResult`, `TableRef`, `ColumnMapping`, etc. |
-| `dialect.rs` | Maps `Dialect` enum to sqlparser dialect implementations |
-| `build/statement.rs` | Statement-level dispatch and column mapping for DML |
-| `build/query.rs` | CTE registration, UNION merge, CTE-wrapped DML |
-| `build/select.rs` | FROM binding registration, projection processing |
-| `build/expr.rs` | Recursive expression traversal for ancestor collection |
-| `graph/node.rs` | `RawNode` enum (Output, Ref, Unqualified, Star) |
-| `graph/edge.rs` | `RawEdge` with `EdgeKind` (Direct, ViaExpression, etc.) |
-| `graph/scope.rs` | `ScopeTree` with bindings, output columns, parent chain |
-| `resolve/mod.rs` | Scope-chain resolution, Star expansion, `ColumnMapping` assembly |
+| `types.rs` | Public types: `AnalyzeResult`, `TableRef`, `ColumnMapping`, etc. |
+| `dialect.rs` | `Dialect` enum → sqlparser dialect mapping |
+| `build/statement.rs` | Statement dispatch, UPDATE SET / MERGE WHEN column mapping |
+| `build/query.rs` | CTE scope management, UNION merge, CTE-wrapped DML |
+| `build/select.rs` | FROM binding registration, projection, CTE reference detection |
+| `build/expr.rs` | Expression traversal for ancestor collection |
+| `graph/node.rs` | `RawNode` enum: Output, Ref, Unqualified, Star |
+| `graph/edge.rs` | `RawEdge` with `EdgeKind` and `is_recursive_back_edge` flag |
+| `graph/scope.rs` | `ScopeTree`: bindings, output columns, anonymous derived tables |
+| `resolve/mod.rs` | Scope-chain resolution, `expand_star()`, `ColumnMapping` assembly |
 | `resolve/topo.rs` | Kahn's algorithm for DAG validation |
 | `resolve/catalog.rs` | `CatalogProvider` application (Wildcard/Ambiguous refinement) |
