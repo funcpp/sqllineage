@@ -24,10 +24,7 @@ fn update_set_expression() {
     let m = find_mapping(&result.columns.mappings, "total");
     assert_eq!(
         concrete_sources(m),
-        vec![
-            ("source".into(), "a".into()),
-            ("source".into(), "b".into()),
-        ]
+        vec![("source".into(), "a".into()), ("source".into(), "b".into()),]
     );
     assert_eq!(m.transform, TransformKind::Expression);
 }

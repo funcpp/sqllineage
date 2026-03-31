@@ -11,7 +11,7 @@
     clippy::missing_const_for_fn,
     clippy::use_self,
     clippy::match_same_arms,
-    clippy::match_wildcard_for_single_variants,
+    clippy::match_wildcard_for_single_variants
 )]
 
 //! # sqllineage
@@ -41,11 +41,11 @@
 //! assert_eq!(result.columns.mappings.len(), 2);
 //! ```
 
-pub mod types;
 mod build;
 mod dialect;
 mod graph;
 mod resolve;
+pub mod types;
 
 pub use types::*;
 

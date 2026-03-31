@@ -53,7 +53,10 @@ fn merge_both_clauses() {
         .iter()
         .filter(|m| m.target.column == "val")
         .collect();
-    assert!(val_mappings.len() >= 2, "expected val from both UPDATE SET and INSERT");
+    assert!(
+        val_mappings.len() >= 2,
+        "expected val from both UPDATE SET and INSERT"
+    );
 
     let id_mappings: Vec<_> = result
         .columns

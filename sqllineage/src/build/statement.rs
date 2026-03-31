@@ -1,7 +1,7 @@
 use sqlparser::ast::{self, AssignmentTarget, FunctionArguments, Ident, MergeAction, Statement};
 
-use crate::build::expr::determine_edge_kind;
 use crate::build::LineageBuilder;
+use crate::build::expr::determine_edge_kind;
 use crate::graph::scope::ScopeColumn;
 use crate::types::{StatementType, TableRef};
 
@@ -14,8 +14,7 @@ impl LineageBuilder {
             }
 
             Statement::Insert(insert) => {
-                self.graph.tables.output =
-                    Some(self.table_ref_from_table_object(&insert.table));
+                self.graph.tables.output = Some(self.table_ref_from_table_object(&insert.table));
                 if let Some(ref source) = insert.source {
                     self.visit_query(source);
                 }
@@ -24,8 +23,7 @@ impl LineageBuilder {
 
             Statement::CreateTable(ct) => {
                 if let Some(ref query) = ct.query {
-                    self.graph.tables.output =
-                        Some(self.table_ref_from_object_name(&ct.name));
+                    self.graph.tables.output = Some(self.table_ref_from_object_name(&ct.name));
                     self.visit_query(query);
                     StatementType::CreateTable
                 } else {
@@ -136,8 +134,7 @@ impl LineageBuilder {
                                             .unwrap_or_else(|| format!("col{i}"));
                                         let ancestors = self.collect_ancestors(expr);
                                         let kind = determine_edge_kind(expr);
-                                        let output =
-                                            self.graph.add_output(col_name.clone());
+                                        let output = self.graph.add_output(col_name.clone());
                                         for &anc in &ancestors {
                                             self.graph.add_edge(anc, output, kind.clone());
                                         }
@@ -203,9 +200,7 @@ impl LineageBuilder {
                     self.scan_expr_for_tables(item);
                 }
             }
-            ast::Expr::IsNull(e)
-            | ast::Expr::IsNotNull(e)
-            | ast::Expr::Cast { expr: e, .. } => {
+            ast::Expr::IsNull(e) | ast::Expr::IsNotNull(e) | ast::Expr::Cast { expr: e, .. } => {
                 self.scan_expr_for_tables(e);
             }
             ast::Expr::Case {
@@ -283,9 +278,7 @@ impl LineageBuilder {
 
     fn table_ref_from_table_factor(&self, factor: &ast::TableFactor) -> Option<TableRef> {
         match factor {
-            ast::TableFactor::Table { name, .. } => {
-                Some(self.table_ref_from_object_name(name))
-            }
+            ast::TableFactor::Table { name, .. } => Some(self.table_ref_from_object_name(name)),
             _ => None,
         }
     }

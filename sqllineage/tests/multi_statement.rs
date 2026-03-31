@@ -1,4 +1,4 @@
-use sqllineage::{analyze, AnalyzeOptions, StatementType, TableRef};
+use sqllineage::{AnalyzeOptions, StatementType, TableRef, analyze};
 
 fn table(name: &str) -> TableRef {
     TableRef::new(name)
@@ -53,7 +53,10 @@ fn empty_input_returns_empty_vec() {
 #[test]
 fn case_normalization_default() {
     let r = &ok("INSERT INTO MySchema.MyTable SELECT Col FROM SRC")[0];
-    assert_eq!(r.tables.output, Some(TableRef::with_schema("myschema", "mytable")));
+    assert_eq!(
+        r.tables.output,
+        Some(TableRef::with_schema("myschema", "mytable"))
+    );
     assert_eq!(r.tables.inputs, vec![table("src")]);
 }
 
@@ -68,18 +71,27 @@ fn case_normalization_disabled() {
     )
     .expect("should parse");
     let r = &results[0];
-    assert_eq!(r.tables.output, Some(TableRef::with_schema("MySchema", "MyTable")));
+    assert_eq!(
+        r.tables.output,
+        Some(TableRef::with_schema("MySchema", "MyTable"))
+    );
     assert_eq!(r.tables.inputs, vec![table("SRC")]);
 }
 
 #[test]
 fn statement_type_update() {
-    assert_eq!(ok("UPDATE t SET a = 1")[0].statement_type, StatementType::Update);
+    assert_eq!(
+        ok("UPDATE t SET a = 1")[0].statement_type,
+        StatementType::Update
+    );
 }
 
 #[test]
 fn statement_type_delete() {
-    assert_eq!(ok("DELETE FROM t WHERE id = 1")[0].statement_type, StatementType::Delete);
+    assert_eq!(
+        ok("DELETE FROM t WHERE id = 1")[0].statement_type,
+        StatementType::Delete
+    );
 }
 
 #[test]

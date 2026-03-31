@@ -1,9 +1,7 @@
 mod common;
 
 use common::find_mapping;
-use sqllineage::{
-    analyze, AnalyzeOptions, CatalogProvider, ColumnOrigin, TableRef,
-};
+use sqllineage::{AnalyzeOptions, CatalogProvider, ColumnOrigin, TableRef, analyze};
 
 struct MockCatalog;
 
@@ -32,9 +30,7 @@ fn opts_with_catalog() -> AnalyzeOptions {
     }
 }
 
-fn concrete_sources(
-    mapping: &sqllineage::ColumnMapping,
-) -> Vec<(String, String)> {
+fn concrete_sources(mapping: &sqllineage::ColumnMapping) -> Vec<(String, String)> {
     let mut v: Vec<(String, String)> = mapping
         .sources
         .iter()
@@ -49,7 +45,11 @@ fn concrete_sources(
 
 #[test]
 fn select_star_with_catalog_expands() {
-    let result = analyze("SELECT * FROM users", opts_with_catalog()).expect("parse").into_iter().next().unwrap();
+    let result = analyze("SELECT * FROM users", opts_with_catalog())
+        .expect("parse")
+        .into_iter()
+        .next()
+        .unwrap();
     assert_eq!(result.columns.mappings.len(), 3);
 
     assert_eq!(
@@ -68,7 +68,11 @@ fn select_star_with_catalog_expands() {
 
 #[test]
 fn select_star_without_catalog_preserved() {
-    let result = analyze("SELECT * FROM users", AnalyzeOptions::default()).expect("parse").into_iter().next().unwrap();
+    let result = analyze("SELECT * FROM users", AnalyzeOptions::default())
+        .expect("parse")
+        .into_iter()
+        .next()
+        .unwrap();
     assert_eq!(result.columns.mappings.len(), 1);
     match &result.columns.mappings[0].sources[0] {
         ColumnOrigin::Wildcard { table } => assert_eq!(table.table, "users"),
@@ -79,18 +83,23 @@ fn select_star_without_catalog_preserved() {
 #[test]
 fn ambiguous_column_resolved_by_catalog() {
     let sql = "SELECT name FROM users JOIN orders ON users.id = orders.user_id";
-    let result = analyze(sql, opts_with_catalog()).expect("parse").into_iter().next().unwrap();
+    let result = analyze(sql, opts_with_catalog())
+        .expect("parse")
+        .into_iter()
+        .next()
+        .unwrap();
     let m = find_mapping(&result.columns.mappings, "name");
-    assert_eq!(
-        concrete_sources(m),
-        vec![("users".into(), "name".into())]
-    );
+    assert_eq!(concrete_sources(m), vec![("users".into(), "name".into())]);
 }
 
 #[test]
 fn ambiguous_column_without_catalog() {
     let sql = "SELECT name FROM users JOIN orders ON users.id = orders.user_id";
-    let result = analyze(sql, AnalyzeOptions::default()).expect("parse").into_iter().next().unwrap();
+    let result = analyze(sql, AnalyzeOptions::default())
+        .expect("parse")
+        .into_iter()
+        .next()
+        .unwrap();
     let m = find_mapping(&result.columns.mappings, "name");
     match &m.sources[0] {
         ColumnOrigin::Ambiguous { column, candidates } => {
@@ -103,8 +112,13 @@ fn ambiguous_column_without_catalog() {
 
 #[test]
 fn catalog_preserves_qualified_columns() {
-    let sql = "SELECT users.name, orders.amount FROM users JOIN orders ON users.id = orders.user_id";
-    let result = analyze(sql, opts_with_catalog()).expect("parse").into_iter().next().unwrap();
+    let sql =
+        "SELECT users.name, orders.amount FROM users JOIN orders ON users.id = orders.user_id";
+    let result = analyze(sql, opts_with_catalog())
+        .expect("parse")
+        .into_iter()
+        .next()
+        .unwrap();
     assert_eq!(
         concrete_sources(find_mapping(&result.columns.mappings, "name")),
         vec![("users".into(), "name".into())]

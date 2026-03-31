@@ -3,8 +3,8 @@ pub(crate) mod query;
 pub(crate) mod select;
 pub(crate) mod statement;
 
-use crate::graph::scope::{Binding, ScopeId, ScopeKind, ScopeTree};
 use crate::graph::RawGraph;
+use crate::graph::scope::{Binding, ScopeId, ScopeKind, ScopeTree};
 use crate::types::{StatementType, Warning, WarningKind};
 use sqlparser::ast::Statement;
 

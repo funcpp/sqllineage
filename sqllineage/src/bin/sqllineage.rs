@@ -1,7 +1,7 @@
 use std::process;
 
 use clap::Parser;
-use sqllineage::{analyze, AnalyzeOptions, AnalyzeResult, ColumnOrigin, Dialect, TransformKind};
+use sqllineage::{AnalyzeOptions, AnalyzeResult, ColumnOrigin, Dialect, TransformKind, analyze};
 
 #[derive(Parser)]
 #[command(

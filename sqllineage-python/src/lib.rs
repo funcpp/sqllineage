@@ -17,7 +17,11 @@ impl PyTableRef {
     #[new]
     #[pyo3(signature = (table, schema=None, catalog=None))]
     fn new(table: String, schema: Option<String>, catalog: Option<String>) -> Self {
-        Self { catalog, schema, table }
+        Self {
+            catalog,
+            schema,
+            table,
+        }
     }
 
     fn __repr__(&self) -> String {
@@ -272,7 +276,12 @@ impl sqllineage_core::CatalogProvider for PyCatalog {
 ///     List of `LineageResult`, one per statement.
 #[pyfunction]
 #[pyo3(signature = (sql, dialect="generic", catalog=None, normalize_case=true))]
-fn analyze(sql: &str, dialect: &str, catalog: Option<Py<PyAny>>, normalize_case: bool) -> PyResult<Vec<PyLineageResult>> {
+fn analyze(
+    sql: &str,
+    dialect: &str,
+    catalog: Option<Py<PyAny>>,
+    normalize_case: bool,
+) -> PyResult<Vec<PyLineageResult>> {
     let d = match dialect.to_lowercase().as_str() {
         "generic" => sqllineage_core::Dialect::Generic,
         "ansi" => sqllineage_core::Dialect::Ansi,
@@ -327,17 +336,17 @@ fn analyze(sql: &str, dialect: &str, catalog: Option<Py<PyAny>>, normalize_case:
 #[pymodule]
 mod sqllineage {
     #[pymodule_export]
-    use super::PyTableRef;
-    #[pymodule_export]
-    use super::PyColumnRef;
+    use super::PyColumnMapping;
     #[pymodule_export]
     use super::PyColumnOrigin;
     #[pymodule_export]
-    use super::PyColumnMapping;
+    use super::PyColumnRef;
+    #[pymodule_export]
+    use super::PyLineageResult;
     #[pymodule_export]
     use super::PyTableLineage;
     #[pymodule_export]
-    use super::PyLineageResult;
+    use super::PyTableRef;
     #[pymodule_export]
     use super::analyze;
 }

@@ -70,7 +70,8 @@ fn update_with_from() {
 
 #[test]
 fn update_with_from_join() {
-    let sql = "UPDATE target SET col1 = s1.col1 FROM s1 JOIN s2 ON s1.id = s2.id WHERE target.id = s1.id";
+    let sql =
+        "UPDATE target SET col1 = s1.col1 FROM s1 JOIN s2 ON s1.id = s2.id WHERE target.id = s1.id";
     let result = analyze_one(sql);
     assert_eq!(result.tables.output, Some(table("target")));
     let mut inputs = result.tables.inputs;

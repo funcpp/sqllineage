@@ -36,8 +36,11 @@ impl LineageBuilder {
 
         if has_ctes {
             // Propagate output columns to parent (CTE-registration) scope
-            let body_outputs: Vec<_> =
-                self.graph.scopes.output_columns(self.current_scope).to_vec();
+            let body_outputs: Vec<_> = self
+                .graph
+                .scopes
+                .output_columns(self.current_scope)
+                .to_vec();
             self.pop_scope();
             for col in body_outputs {
                 self.graph.scopes.add_output_column(self.current_scope, col);

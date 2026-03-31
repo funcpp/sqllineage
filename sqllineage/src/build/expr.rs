@@ -1,7 +1,7 @@
 use sqlparser::ast::{self, Expr, FunctionArguments, WindowType};
 
-use crate::build::select::split_compound;
 use crate::build::LineageBuilder;
+use crate::build::select::split_compound;
 use crate::graph::edge::EdgeKind;
 use crate::graph::node::NodeId;
 use crate::graph::scope::ScopeKind;
@@ -20,9 +20,9 @@ impl LineageBuilder {
 
             Expr::CompoundIdentifier(parts) => {
                 let (qualifier, column) = split_compound(parts);
-                let node =
-                    self.graph
-                        .add_ref(column, Some(qualifier), self.current_scope);
+                let node = self
+                    .graph
+                    .add_ref(column, Some(qualifier), self.current_scope);
                 vec![node]
             }
 
@@ -101,9 +101,7 @@ impl LineageBuilder {
                 vec![]
             }
 
-            Expr::InSubquery {
-                expr, subquery, ..
-            } => {
+            Expr::InSubquery { expr, subquery, .. } => {
                 let v = self.collect_ancestors(expr);
                 let _sub = self.push_scope(ScopeKind::Subquery);
                 self.visit_query(subquery);
