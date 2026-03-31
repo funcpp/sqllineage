@@ -3,10 +3,10 @@ mod topo;
 
 use std::collections::HashSet;
 
+use crate::graph::RawGraph;
 use crate::graph::edge::EdgeKind;
 use crate::graph::node::{NodeId, RawNode};
 use crate::graph::scope::{Binding, ScopeTree};
-use crate::graph::RawGraph;
 use crate::types::{
     AnalyzeResult, CatalogProvider, ColumnLineage, ColumnMapping, ColumnOrigin, ColumnRef,
     StatementType, TableRef, TransformKind, Warning, WarningKind,
@@ -110,29 +110,69 @@ pub(crate) fn resolve(
                         transform: TransformKind::Direct,
                     });
                 } else {
-                    // Unqualified * — generate one Wildcard per visible table
-                    // Find the scope for this star node
-                    let scope_id = graph.nodes.iter().enumerate().find_map(|(i, n)| {
-                        if i == node_id {
-                            if let RawNode::Star { scope, .. } = n {
-                                Some(*scope)
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    });
+                    // Unqualified * — expand per visible binding
+                    let scope_id = if let RawNode::Star { scope, .. } = &graph.nodes[node_id] {
+                        Some(*scope)
+                    } else {
+                        None
+                    };
                     if let Some(sid) = scope_id {
-                        for tref in graph.scopes.visible_tables(sid) {
-                            mappings.push(ColumnMapping {
-                                target: ColumnRef {
-                                    table: output_table.clone(),
-                                    column: "*".to_string(),
-                                },
-                                sources: vec![ColumnOrigin::Wildcard { table: tref }],
-                                transform: TransformKind::Direct,
-                            });
+                        for (_, binding) in graph.scopes.visible_bindings(sid) {
+                            match binding {
+                                Binding::Table(tref) => {
+                                    mappings.push(ColumnMapping {
+                                        target: ColumnRef {
+                                            table: output_table.clone(),
+                                            column: "*".to_string(),
+                                        },
+                                        sources: vec![ColumnOrigin::Wildcard { table: tref }],
+                                        transform: TransformKind::Direct,
+                                    });
+                                }
+                                Binding::Cte(s) | Binding::DerivedTable(s) => {
+                                    for col in graph.scopes.output_columns(s) {
+                                        let mut visited = HashSet::new();
+                                        let (sources, edge_kinds, _) = collect_output_sources(
+                                            col.node_id,
+                                            &graph,
+                                            &mut resolved,
+                                            &incoming,
+                                            &mut visited,
+                                        );
+                                        let transform = derive_transform(&edge_kinds);
+                                        mappings.push(ColumnMapping {
+                                            target: ColumnRef {
+                                                table: output_table.clone(),
+                                                column: col.name.clone(),
+                                            },
+                                            sources,
+                                            transform,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        // Expand anonymous (alias-less) derived tables
+                        for &child in graph.scopes.anonymous_derived(sid) {
+                            for col in graph.scopes.output_columns(child) {
+                                let mut visited = HashSet::new();
+                                let (sources, edge_kinds, _) = collect_output_sources(
+                                    col.node_id,
+                                    &graph,
+                                    &mut resolved,
+                                    &incoming,
+                                    &mut visited,
+                                );
+                                let transform = derive_transform(&edge_kinds);
+                                mappings.push(ColumnMapping {
+                                    target: ColumnRef {
+                                        table: output_table.clone(),
+                                        column: col.name.clone(),
+                                    },
+                                    sources,
+                                    transform,
+                                });
+                            }
                         }
                     }
                 }
@@ -454,20 +494,11 @@ fn resolve_through_scope(
 }
 
 fn derive_transform(kinds: &[EdgeKind]) -> TransformKind {
-    if kinds
-        .iter()
-        .any(|k| matches!(k, EdgeKind::ViaAggregation))
-    {
+    if kinds.iter().any(|k| matches!(k, EdgeKind::ViaAggregation)) {
         TransformKind::Aggregation
-    } else if kinds
-        .iter()
-        .any(|k| matches!(k, EdgeKind::ViaConditional))
-    {
+    } else if kinds.iter().any(|k| matches!(k, EdgeKind::ViaConditional)) {
         TransformKind::Conditional
-    } else if kinds
-        .iter()
-        .any(|k| matches!(k, EdgeKind::ViaExpression))
-    {
+    } else if kinds.iter().any(|k| matches!(k, EdgeKind::ViaExpression)) {
         TransformKind::Expression
     } else {
         TransformKind::Direct

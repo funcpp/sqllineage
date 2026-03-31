@@ -2,8 +2,8 @@ use sqlparser::ast::{
     Expr, Ident, Select, SelectItem, SelectItemQualifiedWildcardKind, TableFactor, TableWithJoins,
 };
 
-use crate::build::expr::determine_edge_kind;
 use crate::build::LineageBuilder;
+use crate::build::expr::determine_edge_kind;
 use crate::graph::scope::{Binding, ScopeColumn, ScopeKind};
 
 impl LineageBuilder {
@@ -104,17 +104,16 @@ impl LineageBuilder {
                     .scopes
                     .lookup(self.current_scope, &table_ref.table)
                     .cloned();
-                let is_cte_ref = matches!(
-                    &existing,
-                    Some(Binding::Cte(_) | Binding::DerivedTable(_))
-                );
+                let is_cte_ref =
+                    matches!(&existing, Some(Binding::Cte(_) | Binding::DerivedTable(_)));
 
                 if !is_self_ref && !is_cte_ref {
                     self.graph.tables.inputs.push(table_ref.clone());
                 }
 
                 let alias_name = alias
-                    .as_ref().map_or_else(|| table_ref.table.clone(), |a| a.name.value.clone());
+                    .as_ref()
+                    .map_or_else(|| table_ref.table.clone(), |a| a.name.value.clone());
 
                 if is_cte_ref {
                     // Always add CTE/DerivedTable binding to current scope
@@ -133,10 +132,11 @@ impl LineageBuilder {
                 self.pop_scope();
 
                 if let Some(a) = alias {
-                    self.add_binding(
-                        a.name.value.clone(),
-                        Binding::DerivedTable(derived_scope),
-                    );
+                    self.add_binding(a.name.value.clone(), Binding::DerivedTable(derived_scope));
+                } else {
+                    self.graph
+                        .scopes
+                        .add_anonymous_derived(self.current_scope, derived_scope);
                 }
             }
 

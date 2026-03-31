@@ -12,6 +12,7 @@ pub(crate) struct ScopeTree {
 struct Scope {
     parent: Option<ScopeId>,
     bindings: HashMap<String, Binding>,
+    anonymous_derived: Vec<ScopeId>,
     output_columns: Vec<ScopeColumn>,
 }
 
@@ -43,6 +44,7 @@ impl ScopeTree {
             scopes: vec![Scope {
                 parent: None,
                 bindings: HashMap::new(),
+                anonymous_derived: Vec::new(),
                 output_columns: Vec::new(),
             }],
         }
@@ -57,6 +59,7 @@ impl ScopeTree {
         self.scopes.push(Scope {
             parent: Some(parent),
             bindings: HashMap::new(),
+            anonymous_derived: Vec::new(),
             output_columns: Vec::new(),
         });
         id
@@ -88,18 +91,12 @@ impl ScopeTree {
         &self.scopes[scope].output_columns
     }
 
-    pub fn visible_tables(&self, scope: ScopeId) -> Vec<TableRef> {
-        let mut tables = Vec::new();
-        let mut current = Some(scope);
-        while let Some(id) = current {
-            for binding in self.scopes[id].bindings.values() {
-                if let Binding::Table(t) = binding {
-                    tables.push(t.clone());
-                }
-            }
-            current = self.scopes[id].parent;
-        }
-        tables
+    pub fn add_anonymous_derived(&mut self, parent: ScopeId, child: ScopeId) {
+        self.scopes[parent].anonymous_derived.push(child);
+    }
+
+    pub fn anonymous_derived(&self, scope: ScopeId) -> &[ScopeId] {
+        &self.scopes[scope].anonymous_derived
     }
 
     /// Bindings in the immediate scope only (no parent chain walk).

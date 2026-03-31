@@ -1,7 +1,7 @@
 mod common;
 
 use common::{analyze_one, concrete_sources, find_mapping, table};
-use sqllineage::{ColumnOrigin, TransformKind};
+use sqllineage::{ColumnOrigin, TableRef, TransformKind};
 
 #[test]
 fn single_cte() {
@@ -165,4 +165,53 @@ fn union_inside_cte() {
         concrete_sources(m),
         vec![("t1".into(), "a".into()), ("t2".into(), "b".into())]
     );
+}
+
+#[test]
+fn select_star_from_derived_table() {
+    let sql = "\
+        SELECT * FROM (\
+            SELECT base_date, money_code, action_type_code \
+            FROM core.cos_dw.some_table\
+        )";
+    let result = analyze_one(sql);
+    assert_eq!(
+        result.tables.inputs,
+        vec![TableRef {
+            catalog: Some("core".into()),
+            schema: Some("cos_dw".into()),
+            table: "some_table".into(),
+        }]
+    );
+    assert_eq!(result.columns.mappings.len(), 3);
+    let m = find_mapping(&result.columns.mappings, "base_date");
+    assert_eq!(
+        concrete_sources(m),
+        vec![("some_table".into(), "base_date".into())]
+    );
+    assert_eq!(m.transform, TransformKind::Direct);
+
+    let m = find_mapping(&result.columns.mappings, "money_code");
+    assert_eq!(
+        concrete_sources(m),
+        vec![("some_table".into(), "money_code".into())]
+    );
+
+    let m = find_mapping(&result.columns.mappings, "action_type_code");
+    assert_eq!(
+        concrete_sources(m),
+        vec![("some_table".into(), "action_type_code".into())]
+    );
+}
+
+#[test]
+fn select_star_from_cte() {
+    let sql = "WITH cte AS (SELECT a, b FROM t) SELECT * FROM cte";
+    let result = analyze_one(sql);
+    assert_eq!(result.tables.inputs, vec![table("t")]);
+    assert_eq!(result.columns.mappings.len(), 2);
+    let m = find_mapping(&result.columns.mappings, "a");
+    assert_eq!(concrete_sources(m), vec![("t".into(), "a".into())]);
+    let m = find_mapping(&result.columns.mappings, "b");
+    assert_eq!(concrete_sources(m), vec![("t".into(), "b".into())]);
 }
