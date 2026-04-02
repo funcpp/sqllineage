@@ -78,9 +78,10 @@ jobs:
           pip install dist/*.whl
           python -c "
           import sqllineage
-          result = sqllineage.analyze('SELECT a FROM t')
-          assert len(result.source_tables()) > 0
-          print('OK:', result)
+          results = sqllineage.analyze('SELECT a FROM t')
+          assert len(results) == 1
+          assert len(results[0].tables.inputs) > 0
+          print('OK:', results[0])
           "
 
   publish:
