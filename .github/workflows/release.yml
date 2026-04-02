@@ -29,15 +29,15 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
       - name: Set up QEMU
         if: matrix.qemu
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
         with:
           platforms: arm64
 
@@ -51,7 +51,7 @@ jobs:
             --manifest-path sqllineage-python/Cargo.toml
           manylinux: auto
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wheel-${{ matrix.target }}
           path: dist/*.whl
@@ -64,12 +64,12 @@ jobs:
       matrix:
         python-version: ["3.9", "3.12"]
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: wheel-x86_64-unknown-linux-gnu
           path: dist
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -93,7 +93,7 @@ jobs:
       id-token: write
       contents: read
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           pattern: wheel-*
