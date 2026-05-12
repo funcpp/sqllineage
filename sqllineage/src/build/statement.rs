@@ -156,7 +156,9 @@ impl LineageBuilder {
             }
 
             // Statements that do not carry data lineage.
-            Statement::AlterConnector { .. }
+            Statement::AlterCollation(_)
+            | Statement::AlterConnector { .. }
+            | Statement::AlterFunction(_)
             | Statement::AlterIndex { .. }
             | Statement::AlterOperator { .. }
             | Statement::AlterOperatorClass { .. }
@@ -181,6 +183,7 @@ impl LineageBuilder {
             | Statement::Commit { .. }
             | Statement::Copy { .. }
             | Statement::CopyIntoSnowflake { .. }
+            | Statement::CreateCollation(_)
             | Statement::CreateConnector { .. }
             | Statement::CreateDatabase { .. }
             | Statement::CreateDomain { .. }
@@ -256,6 +259,7 @@ impl LineageBuilder {
             | Statement::Rollback { .. }
             | Statement::Savepoint { .. }
             | Statement::Set(_)
+            | Statement::ShowCatalogs { .. }
             | Statement::ShowCharset { .. }
             | Statement::ShowCollation { .. }
             | Statement::ShowColumns { .. }
@@ -263,6 +267,7 @@ impl LineageBuilder {
             | Statement::ShowDatabases { .. }
             | Statement::ShowFunctions { .. }
             | Statement::ShowObjects { .. }
+            | Statement::ShowProcessList { .. }
             | Statement::ShowSchemas { .. }
             | Statement::ShowStatus { .. }
             | Statement::ShowTables { .. }
