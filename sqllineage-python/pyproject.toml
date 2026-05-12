@@ -4,8 +4,9 @@ build-backend = "maturin"
 
 [project]
 name = "sqllineage-rs"
-version = "0.1.5"
+version = "0.2.0"
 description = "Extract table and column-level lineage from SQL"
+readme = "README.md"
 license = "MIT OR Apache-2.0"
 requires-python = ">=3.9"
 classifiers = [
