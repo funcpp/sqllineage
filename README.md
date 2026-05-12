@@ -2,12 +2,11 @@
 
 Extract table-level and column-level data lineage from SQL statements.
 
-`sqllineage` parses SQL (via [sqlparser](https://crates.io/crates/sqlparser)) and
-produces a structured lineage result showing which tables are read/written and
-which source columns each output column derives from.
+`sqllineage` parses SQL (via [sqlparser](https://crates.io/crates/sqlparser)) and produces a structured lineage result showing which tables are read/written and which source columns each output column derives from.
 
-**Schema-agnostic by default** — works without any catalog metadata. Supply a
-`CatalogProvider` to resolve `SELECT *` and disambiguate unqualified columns.
+**Schema-agnostic by default** — works without any catalog metadata. Supply a `CatalogProvider` to resolve `SELECT *` and disambiguate unqualified columns.
+
+Typical use cases: building data catalogs and lineage graphs (e.g. OpenLineage emitters), impact analysis when a column/table changes, and validating SQL migrations against expected inputs and outputs.
 
 ## Features
 
@@ -121,13 +120,11 @@ Options:
   -h, --help               Print help
 ```
 
-Supported dialects: `generic`, `ansi`, `postgresql`, `mysql`, `hive`,
-`databricks`, `snowflake`, `bigquery`.
+Supported dialects: `generic`, `ansi`, `postgresql`, `mysql`, `hive`, `databricks`, `snowflake`, `bigquery`.
 
 ## CatalogProvider
 
-Supply a `CatalogProvider` to resolve `SELECT *` and disambiguate unqualified
-columns in multi-table queries:
+Supply a `CatalogProvider` to resolve `SELECT *` and disambiguate unqualified columns in multi-table queries:
 
 ```rust
 use sqllineage::{analyze, AnalyzeOptions, CatalogProvider, TableRef};
@@ -174,6 +171,12 @@ class MyCatalog:
 results = analyze("SELECT * FROM users", catalog=MyCatalog())
 assert len(results[0].columns) == 3
 ```
+
+## Limitations
+
+- Pure static analysis — prepared-statement parameters and dynamically built SQL strings are not resolved.
+- View bodies are not introspected. `SELECT * FROM my_view` keeps `my_view` as an input without expanding into the view's source tables. Supply a `CatalogProvider` to expand `SELECT *` against known column lists.
+- Lineage is extracted only for `SELECT`, `INSERT`, `CREATE TABLE AS`, `UPDATE`, `DELETE`, and `MERGE`. Other statements (most DDL/DCL, `COPY`, `LOAD DATA`, stored-procedure bodies) parse without errors but are classified as `Other` with no inputs or outputs.
 
 ## License
 
