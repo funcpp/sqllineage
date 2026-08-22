@@ -81,6 +81,46 @@ fn select_multiple_tables_qualified() {
 }
 
 #[test]
+fn duplicate_output_names_preserve_projection_order() {
+    let result = analyze_one("SELECT a.id, b.id FROM a JOIN b ON a.id = b.bid");
+    let sources: Vec<_> = result
+        .columns
+        .mappings
+        .iter()
+        .map(concrete_sources)
+        .collect();
+
+    assert_eq!(
+        sources,
+        vec![
+            vec![("a".into(), "id".into())],
+            vec![("b".into(), "id".into())]
+        ]
+    );
+}
+
+#[test]
+fn three_duplicate_output_names_preserve_projection_order() {
+    let result =
+        analyze_one("SELECT a.id, b.id, c.id FROM a JOIN b ON a.id = b.bid JOIN c ON a.id = c.cid");
+    let sources: Vec<_> = result
+        .columns
+        .mappings
+        .iter()
+        .map(concrete_sources)
+        .collect();
+
+    assert_eq!(
+        sources,
+        vec![
+            vec![("a".into(), "id".into())],
+            vec![("b".into(), "id".into())],
+            vec![("c".into(), "id".into())],
+        ]
+    );
+}
+
+#[test]
 fn select_case_expression() {
     let result = analyze_one("SELECT CASE WHEN a > 0 THEN b ELSE c END AS d FROM t");
     let m = find_mapping(&result.columns.mappings, "d");
