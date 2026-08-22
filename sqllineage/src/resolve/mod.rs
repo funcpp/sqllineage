@@ -1,7 +1,7 @@
 mod catalog;
 mod topo;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::graph::RawGraph;
 use crate::graph::edge::EdgeKind;
@@ -53,12 +53,11 @@ pub(crate) fn resolve(
 
     let root = ScopeTree::root();
     let ordered_cols = graph.scopes.output_columns(root).to_vec();
-    let final_ids: HashSet<NodeId> = ordered_cols.iter().map(|c| c.node_id).collect();
-
     let output_table = graph.tables.output.clone();
     let mut mappings = Vec::new();
 
-    for &node_id in &final_ids {
+    for col in &ordered_cols {
+        let node_id = col.node_id;
         match &graph.nodes[node_id] {
             RawNode::Output { name, .. } => {
                 let mut visited = HashSet::new();
@@ -95,17 +94,6 @@ pub(crate) fn resolve(
             _ => {}
         }
     }
-
-    let name_order: HashMap<String, usize> = ordered_cols
-        .iter()
-        .enumerate()
-        .filter_map(|(i, c)| match &graph.nodes[c.node_id] {
-            RawNode::Output { name, .. } => Some((name.clone(), i)),
-            RawNode::Star { .. } => Some(("*".to_string(), i)),
-            _ => None,
-        })
-        .collect();
-    mappings.sort_by_key(|m| name_order.get(&m.target.column).copied().unwrap_or(usize::MAX));
 
     if let Some(cat) = catalog {
         catalog::apply_catalog(&mut mappings, cat);
