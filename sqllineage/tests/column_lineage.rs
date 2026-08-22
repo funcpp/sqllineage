@@ -1,7 +1,7 @@
 mod common;
 
 use common::{analyze_one, concrete_sources, find_mapping, table};
-use sqllineage::TransformKind;
+use sqllineage::{ColumnOrigin, TransformKind};
 
 #[test]
 fn select_columns() {
@@ -16,6 +16,19 @@ fn select_columns() {
     let m_b = find_mapping(&result.columns.mappings, "b");
     assert_eq!(concrete_sources(m_b), vec![("t".into(), "b".into())]);
     assert_eq!(m_b.transform, TransformKind::Direct);
+}
+
+#[test]
+fn unresolved_column_has_empty_ambiguous_candidates() {
+    let result = analyze_one("SELECT missing");
+    let m = find_mapping(&result.columns.mappings, "missing");
+    match &m.sources[0] {
+        ColumnOrigin::Ambiguous { column, candidates } => {
+            assert_eq!(column, "missing");
+            assert!(candidates.is_empty());
+        }
+        other => panic!("expected Ambiguous, got {other:?}"),
+    }
 }
 
 #[test]

@@ -23,6 +23,18 @@ impl CatalogProvider for MockCatalog {
     }
 }
 
+struct EagerCatalog;
+
+impl CatalogProvider for EagerCatalog {
+    fn list_columns(&self, _table: &TableRef) -> Option<Vec<String>> {
+        None
+    }
+
+    fn resolve_column(&self, _column: &str, _candidates: &[TableRef]) -> Option<TableRef> {
+        Some(TableRef::new("fabricated"))
+    }
+}
+
 fn opts_with_catalog() -> AnalyzeOptions {
     AnalyzeOptions {
         catalog: Some(Box::new(MockCatalog)),
@@ -105,6 +117,29 @@ fn ambiguous_column_without_catalog() {
         ColumnOrigin::Ambiguous { column, candidates } => {
             assert_eq!(column, "name");
             assert!(candidates.len() >= 2);
+        }
+        other => panic!("expected Ambiguous, got {other:?}"),
+    }
+}
+
+#[test]
+fn catalog_does_not_fabricate_unresolved_column_owner() {
+    let result = analyze(
+        "SELECT missing",
+        AnalyzeOptions {
+            catalog: Some(Box::new(EagerCatalog)),
+            ..AnalyzeOptions::default()
+        },
+    )
+    .expect("parse")
+    .into_iter()
+    .next()
+    .unwrap();
+    let m = find_mapping(&result.columns.mappings, "missing");
+    match &m.sources[0] {
+        ColumnOrigin::Ambiguous { column, candidates } => {
+            assert_eq!(column, "missing");
+            assert!(candidates.is_empty());
         }
         other => panic!("expected Ambiguous, got {other:?}"),
     }

@@ -17,7 +17,8 @@ class ColumnOrigin:
 
     Check ``kind`` to determine the variant:
     - ``"concrete"``: ``table`` and ``column`` are set.
-    - ``"ambiguous"``: ``column`` and ``candidates`` are set.
+    - ``"ambiguous"``: ``column`` and ``candidates`` are set. ``candidates``
+      may be an empty list when the column is unresolved.
     - ``"wildcard"``: ``table`` is set.
     - ``"recursive"``: ``base_sources`` is set.
     """

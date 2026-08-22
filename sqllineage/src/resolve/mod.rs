@@ -385,9 +385,9 @@ fn resolve_from_bindings(
             }
         }
     } else if bindings.is_empty() {
-        Some(ColumnOrigin::Concrete {
-            table: TableRef::new("?unknown?"),
+        Some(ColumnOrigin::Ambiguous {
             column: name.to_string(),
+            candidates: Vec::new(),
         })
     } else {
         let mut table_candidates = Vec::new();
@@ -444,9 +444,9 @@ fn resolve_through_scope(
             origins.into_iter().next()
         }
     } else {
-        Some(ColumnOrigin::Concrete {
-            table: TableRef::new("?cte?"),
+        Some(ColumnOrigin::Ambiguous {
             column: column_name.to_string(),
+            candidates: Vec::new(),
         })
     }
 }
