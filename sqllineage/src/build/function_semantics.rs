@@ -9,6 +9,11 @@
 //! (including `BigQuery` `WEEK(MONDAY)`) and [issue 1983](https://github.com/apache/datafusion-sqlparser-rs/issues/1983)
 //! / [PR 2030](https://github.com/apache/datafusion-sqlparser-rs/pull/2030)
 //! (dialect-specific `EXTRACT` date-part parsing).
+//!
+//! The tables below are an exception inventory for official static syntax that
+//! sqlparser represents as generic identifiers, not a registry of every
+//! temporal function. Unknown functions and dynamic expressions retain the
+//! generic all-values fallback.
 
 use sqlparser::ast::{
     Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, ObjectNamePart,
@@ -46,7 +51,7 @@ struct DatePartToken {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DatePartProfile {
-    tokens: &'static [DatePartToken],
+    token_groups: &'static [&'static [DatePartToken]],
     allows_weekday_modifier: bool,
 }
 
@@ -90,6 +95,44 @@ const DB_DIFF_PART_VALUE_VALUE: &[ArgumentSemantic] = &[
 ];
 const MYSQL_PART_VALUE_VALUE: &[ArgumentSemantic] = &[
     ArgumentSemantic::DatePart(MYSQL_DATE_PART),
+    ArgumentSemantic::ValueExpression,
+    ArgumentSemantic::ValueExpression,
+];
+const REDSHIFT_PART_VALUE_VALUE: &[ArgumentSemantic] = &[
+    ArgumentSemantic::DatePart(REDSHIFT_ADD_DIFF_DATE_PART),
+    ArgumentSemantic::ValueExpression,
+    ArgumentSemantic::ValueExpression,
+];
+const REDSHIFT_PART_VALUE: &[ArgumentSemantic] = &[
+    ArgumentSemantic::DatePart(REDSHIFT_DATE_PART),
+    ArgumentSemantic::ValueExpression,
+];
+const MSSQL_PART_VALUE_VALUE: &[ArgumentSemantic] = &[
+    ArgumentSemantic::DatePart(MSSQL_DATEADD_DATE_PART),
+    ArgumentSemantic::ValueExpression,
+    ArgumentSemantic::ValueExpression,
+];
+const MSSQL_DATEDIFF_PART_VALUE_VALUE: &[ArgumentSemantic] = &[
+    ArgumentSemantic::DatePart(MSSQL_DATEDIFF_DATE_PART),
+    ArgumentSemantic::ValueExpression,
+    ArgumentSemantic::ValueExpression,
+];
+const MSSQL_PART_VALUE: &[ArgumentSemantic] = &[
+    ArgumentSemantic::DatePart(MSSQL_DATEPART_DATE_PART),
+    ArgumentSemantic::ValueExpression,
+];
+const MSSQL_DATETRUNC_PART_VALUE: &[ArgumentSemantic] = &[
+    ArgumentSemantic::DatePart(MSSQL_DATETRUNC_DATE_PART),
+    ArgumentSemantic::ValueExpression,
+];
+const MSSQL_DATE_BUCKET_PART_VALUE_VALUE: &[ArgumentSemantic] = &[
+    ArgumentSemantic::DatePart(MSSQL_DATE_BUCKET_DATE_PART),
+    ArgumentSemantic::ValueExpression,
+    ArgumentSemantic::ValueExpression,
+];
+const MSSQL_DATE_BUCKET_PART_VALUE_VALUE_VALUE: &[ArgumentSemantic] = &[
+    ArgumentSemantic::DatePart(MSSQL_DATE_BUCKET_DATE_PART),
+    ArgumentSemantic::ValueExpression,
     ArgumentSemantic::ValueExpression,
     ArgumentSemantic::ValueExpression,
 ];
@@ -400,25 +443,246 @@ const DATABRICKS_DIFF_PARTS: &[DatePartToken] = &[
         aliases: EMPTY_ALIASES,
     },
 ];
+const REDSHIFT_COMMON_PARTS: &[DatePartToken] = &[
+    DatePartToken {
+        canonical: "MILLENNIUM",
+        aliases: &["millennia", "mil", "mils"],
+    },
+    DatePartToken {
+        canonical: "CENTURY",
+        aliases: &["centuries", "c", "cent", "cents"],
+    },
+    DatePartToken {
+        canonical: "DECADE",
+        aliases: &["decades", "dec", "decs"],
+    },
+    DatePartToken {
+        canonical: "YEAR",
+        aliases: &["years", "y", "yr", "yrs"],
+    },
+    DatePartToken {
+        canonical: "QUARTER",
+        aliases: &["quarters", "qtr", "qtrs"],
+    },
+    DatePartToken {
+        canonical: "MONTH",
+        aliases: &["months", "mon", "mons"],
+    },
+    DatePartToken {
+        canonical: "WEEK",
+        aliases: &["weeks", "w"],
+    },
+    DatePartToken {
+        canonical: "DAY",
+        aliases: &["days", "d"],
+    },
+    DatePartToken {
+        canonical: "HOUR",
+        aliases: &["hours", "h", "hr", "hrs"],
+    },
+    DatePartToken {
+        canonical: "MINUTE",
+        aliases: &["minutes", "m", "min", "mins"],
+    },
+    DatePartToken {
+        canonical: "SECOND",
+        aliases: &["seconds", "s", "sec", "secs"],
+    },
+    DatePartToken {
+        canonical: "MILLISECOND",
+        aliases: &[
+            "ms",
+            "msec",
+            "msecs",
+            "msecond",
+            "mseconds",
+            "millisec",
+            "millisecs",
+            "millisecon",
+            "milliseconds",
+        ],
+    },
+    DatePartToken {
+        canonical: "MICROSECOND",
+        aliases: &[
+            "microsec",
+            "microsecs",
+            "usecond",
+            "useconds",
+            "us",
+            "usec",
+            "usecs",
+            "microseconds",
+        ],
+    },
+];
+const REDSHIFT_DATE_PART_EXTRA: &[DatePartToken] = &[DatePartToken {
+    canonical: "DAYOFWEEK",
+    aliases: &["dow", "dw", "weekday"],
+}];
+const MSSQL_COMMON_PARTS: &[DatePartToken] = &[
+    DatePartToken {
+        canonical: "YEAR",
+        aliases: &["yy", "yyyy"],
+    },
+    DatePartToken {
+        canonical: "QUARTER",
+        aliases: &["qq", "q"],
+    },
+    DatePartToken {
+        canonical: "MONTH",
+        aliases: &["mm", "m"],
+    },
+    DatePartToken {
+        canonical: "DAYOFYEAR",
+        aliases: &["dy", "y"],
+    },
+    DatePartToken {
+        canonical: "DAY",
+        aliases: &["dd", "d"],
+    },
+    DatePartToken {
+        canonical: "WEEK",
+        aliases: &["wk", "ww"],
+    },
+    DatePartToken {
+        canonical: "HOUR",
+        aliases: &["hh"],
+    },
+    DatePartToken {
+        canonical: "MINUTE",
+        aliases: &["mi", "n"],
+    },
+    DatePartToken {
+        canonical: "SECOND",
+        aliases: &["ss", "s"],
+    },
+    DatePartToken {
+        canonical: "MILLISECOND",
+        aliases: &["ms"],
+    },
+    DatePartToken {
+        canonical: "MICROSECOND",
+        aliases: &["mcs"],
+    },
+];
+const MSSQL_ADD_DIFF_EXTRA: &[DatePartToken] = &[
+    DatePartToken {
+        canonical: "WEEKDAY",
+        aliases: &["dw", "w"],
+    },
+    DatePartToken {
+        canonical: "NANOSECOND",
+        aliases: &["ns"],
+    },
+];
+const MSSQL_DATEPART_EXTRA: &[DatePartToken] = &[
+    DatePartToken {
+        canonical: "WEEKDAY",
+        aliases: &["dw"],
+    },
+    DatePartToken {
+        canonical: "NANOSECOND",
+        aliases: &["ns"],
+    },
+    DatePartToken {
+        canonical: "TZOFFSET",
+        aliases: &["tz"],
+    },
+    DatePartToken {
+        canonical: "ISO_WEEK",
+        aliases: &["isowk", "isoww"],
+    },
+];
+const MSSQL_DATETRUNC_EXTRA: &[DatePartToken] = &[DatePartToken {
+    canonical: "ISO_WEEK",
+    aliases: &["isowk", "isoww"],
+}];
+const MSSQL_DATE_BUCKET_PARTS: &[DatePartToken] = &[
+    DatePartToken {
+        canonical: "YEAR",
+        aliases: &["yy", "yyyy"],
+    },
+    DatePartToken {
+        canonical: "QUARTER",
+        aliases: &["qq", "q"],
+    },
+    DatePartToken {
+        canonical: "MONTH",
+        aliases: &["mm", "m"],
+    },
+    DatePartToken {
+        canonical: "DAY",
+        aliases: &["dd", "d"],
+    },
+    DatePartToken {
+        canonical: "WEEK",
+        aliases: &["wk", "ww"],
+    },
+    DatePartToken {
+        canonical: "HOUR",
+        aliases: &["hh"],
+    },
+    DatePartToken {
+        canonical: "MINUTE",
+        aliases: &["mi", "n"],
+    },
+    DatePartToken {
+        canonical: "SECOND",
+        aliases: &["ss", "s"],
+    },
+    DatePartToken {
+        canonical: "MILLISECOND",
+        aliases: &["ms"],
+    },
+];
 
 static BIGQUERY_PROFILE: DatePartProfile = DatePartProfile {
-    tokens: BQ_PARTS,
+    token_groups: &[BQ_PARTS],
     allows_weekday_modifier: true,
 };
 static SNOWFLAKE_PROFILE: DatePartProfile = DatePartProfile {
-    tokens: SNOWFLAKE_PARTS,
+    token_groups: &[SNOWFLAKE_PARTS],
     allows_weekday_modifier: false,
 };
 static MYSQL_PROFILE: DatePartProfile = DatePartProfile {
-    tokens: MYSQL_PARTS,
+    token_groups: &[MYSQL_PARTS],
     allows_weekday_modifier: false,
 };
 static DATABRICKS_ADD_PROFILE: DatePartProfile = DatePartProfile {
-    tokens: DATABRICKS_ADD_PARTS,
+    token_groups: &[DATABRICKS_ADD_PARTS],
     allows_weekday_modifier: false,
 };
 static DATABRICKS_DIFF_PROFILE: DatePartProfile = DatePartProfile {
-    tokens: DATABRICKS_DIFF_PARTS,
+    token_groups: &[DATABRICKS_DIFF_PARTS],
+    allows_weekday_modifier: false,
+};
+static REDSHIFT_ADD_DIFF_PROFILE: DatePartProfile = DatePartProfile {
+    token_groups: &[REDSHIFT_COMMON_PARTS],
+    allows_weekday_modifier: false,
+};
+static REDSHIFT_DATE_PART_PROFILE: DatePartProfile = DatePartProfile {
+    token_groups: &[REDSHIFT_COMMON_PARTS, REDSHIFT_DATE_PART_EXTRA],
+    allows_weekday_modifier: false,
+};
+static MSSQL_DATEADD_PROFILE: DatePartProfile = DatePartProfile {
+    token_groups: &[MSSQL_COMMON_PARTS, MSSQL_ADD_DIFF_EXTRA],
+    allows_weekday_modifier: false,
+};
+static MSSQL_DATEDIFF_PROFILE: DatePartProfile = DatePartProfile {
+    token_groups: &[MSSQL_COMMON_PARTS, MSSQL_ADD_DIFF_EXTRA],
+    allows_weekday_modifier: false,
+};
+static MSSQL_DATEPART_PROFILE: DatePartProfile = DatePartProfile {
+    token_groups: &[MSSQL_COMMON_PARTS, MSSQL_DATEPART_EXTRA],
+    allows_weekday_modifier: false,
+};
+static MSSQL_DATETRUNC_PROFILE: DatePartProfile = DatePartProfile {
+    token_groups: &[MSSQL_COMMON_PARTS, MSSQL_DATETRUNC_EXTRA],
+    allows_weekday_modifier: false,
+};
+static MSSQL_DATE_BUCKET_PROFILE: DatePartProfile = DatePartProfile {
+    token_groups: &[MSSQL_DATE_BUCKET_PARTS],
     allows_weekday_modifier: false,
 };
 
@@ -436,6 +700,27 @@ const DATABRICKS_DATE_PART: DatePartGrammar = DatePartGrammar {
 };
 const DATABRICKS_DIFF_DATE_PART: DatePartGrammar = DatePartGrammar {
     profile: &DATABRICKS_DIFF_PROFILE,
+};
+const REDSHIFT_ADD_DIFF_DATE_PART: DatePartGrammar = DatePartGrammar {
+    profile: &REDSHIFT_ADD_DIFF_PROFILE,
+};
+const REDSHIFT_DATE_PART: DatePartGrammar = DatePartGrammar {
+    profile: &REDSHIFT_DATE_PART_PROFILE,
+};
+const MSSQL_DATEADD_DATE_PART: DatePartGrammar = DatePartGrammar {
+    profile: &MSSQL_DATEADD_PROFILE,
+};
+const MSSQL_DATEDIFF_DATE_PART: DatePartGrammar = DatePartGrammar {
+    profile: &MSSQL_DATEDIFF_PROFILE,
+};
+const MSSQL_DATEPART_DATE_PART: DatePartGrammar = DatePartGrammar {
+    profile: &MSSQL_DATEPART_PROFILE,
+};
+const MSSQL_DATETRUNC_DATE_PART: DatePartGrammar = DatePartGrammar {
+    profile: &MSSQL_DATETRUNC_PROFILE,
+};
+const MSSQL_DATE_BUCKET_DATE_PART: DatePartGrammar = DatePartGrammar {
+    profile: &MSSQL_DATE_BUCKET_PROFILE,
 };
 
 const BQ_TRUNC_NAMES: &[&str] = &[
@@ -460,6 +745,13 @@ const SNOW_VALUE_PART_NAMES: &[&str] = &["LAST_DAY", "TRUNC"];
 const MYSQL_ADD_DIFF_NAMES: &[&str] = &["TIMESTAMPADD", "TIMESTAMPDIFF"];
 const DATABRICKS_ADD_NAMES: &[&str] = &["DATEADD", "DATE_ADD", "TIMESTAMPADD"];
 const DATABRICKS_DIFF_NAMES: &[&str] = &["DATEDIFF", "DATE_DIFF", "TIMESTAMPDIFF"];
+const REDSHIFT_ADD_DIFF_NAMES: &[&str] = &["DATEADD", "DATEDIFF"];
+const REDSHIFT_DATE_PART_NAMES: &[&str] = &["DATE_PART", "PGDATE_PART"];
+const MSSQL_DATEADD_NAMES: &[&str] = &["DATEADD"];
+const MSSQL_DATEDIFF_NAMES: &[&str] = &["DATEDIFF", "DATEDIFF_BIG"];
+const MSSQL_DATEPART_NAMES: &[&str] = &["DATEPART", "DATENAME"];
+const MSSQL_DATETRUNC_NAMES: &[&str] = &["DATETRUNC"];
+const MSSQL_DATE_BUCKET_NAMES: &[&str] = &["DATE_BUCKET"];
 
 const BIGQUERY_SIGNATURES: &[FunctionSignature] = &[
     FunctionSignature {
@@ -523,6 +815,50 @@ const DATABRICKS_SIGNATURES: &[FunctionSignature] = &[
         names: DATABRICKS_DIFF_NAMES,
         arity: 3,
         arguments: DB_DIFF_PART_VALUE_VALUE,
+    },
+];
+const REDSHIFT_SIGNATURES: &[FunctionSignature] = &[
+    FunctionSignature {
+        names: REDSHIFT_ADD_DIFF_NAMES,
+        arity: 3,
+        arguments: REDSHIFT_PART_VALUE_VALUE,
+    },
+    FunctionSignature {
+        names: REDSHIFT_DATE_PART_NAMES,
+        arity: 2,
+        arguments: REDSHIFT_PART_VALUE,
+    },
+];
+const MSSQL_SIGNATURES: &[FunctionSignature] = &[
+    FunctionSignature {
+        names: MSSQL_DATEADD_NAMES,
+        arity: 3,
+        arguments: MSSQL_PART_VALUE_VALUE,
+    },
+    FunctionSignature {
+        names: MSSQL_DATEDIFF_NAMES,
+        arity: 3,
+        arguments: MSSQL_DATEDIFF_PART_VALUE_VALUE,
+    },
+    FunctionSignature {
+        names: MSSQL_DATEPART_NAMES,
+        arity: 2,
+        arguments: MSSQL_PART_VALUE,
+    },
+    FunctionSignature {
+        names: MSSQL_DATETRUNC_NAMES,
+        arity: 2,
+        arguments: MSSQL_DATETRUNC_PART_VALUE,
+    },
+    FunctionSignature {
+        names: MSSQL_DATE_BUCKET_NAMES,
+        arity: 3,
+        arguments: MSSQL_DATE_BUCKET_PART_VALUE_VALUE,
+    },
+    FunctionSignature {
+        names: MSSQL_DATE_BUCKET_NAMES,
+        arity: 4,
+        arguments: MSSQL_DATE_BUCKET_PART_VALUE_VALUE_VALUE,
     },
 ];
 
@@ -598,7 +934,17 @@ fn profile(dialect: Dialect) -> &'static [FunctionSignature] {
         Dialect::Snowflake => SNOWFLAKE_SIGNATURES,
         Dialect::MySql => MYSQL_SIGNATURES,
         Dialect::Databricks => DATABRICKS_SIGNATURES,
-        Dialect::Generic | Dialect::Ansi | Dialect::PostgreSql | Dialect::Hive => &[],
+        Dialect::Redshift => REDSHIFT_SIGNATURES,
+        Dialect::MsSql => MSSQL_SIGNATURES,
+        Dialect::Generic
+        | Dialect::Ansi
+        | Dialect::PostgreSql
+        | Dialect::Hive
+        | Dialect::DuckDb
+        | Dialect::Trino
+        | Dialect::Spark
+        | Dialect::ClickHouse
+        | Dialect::SQLite => &[],
     }
 }
 
@@ -608,12 +954,14 @@ impl DatePartGrammar {
     }
 
     fn is_part_name(self, value: &str) -> bool {
-        self.profile.tokens.iter().any(|token| {
-            token.canonical.eq_ignore_ascii_case(value)
-                || token
-                    .aliases
-                    .iter()
-                    .any(|alias| alias.eq_ignore_ascii_case(value))
+        self.profile.token_groups.iter().any(|group| {
+            group.iter().any(|token| {
+                token.canonical.eq_ignore_ascii_case(value)
+                    || token
+                        .aliases
+                        .iter()
+                        .any(|alias| alias.eq_ignore_ascii_case(value))
+            })
         })
     }
 
@@ -668,6 +1016,8 @@ mod tests {
             (Dialect::Snowflake, "SELECT DATEADD(DAY, a, b) FROM t"),
             (Dialect::MySql, "SELECT TIMESTAMPDIFF(DAY, a, b) FROM t"),
             (Dialect::Databricks, "SELECT DATEDIFF(DAY, a, b) FROM t"),
+            (Dialect::Redshift, "SELECT DATEADD(DAY, a, b) FROM t"),
+            (Dialect::MsSql, "SELECT DATEADD(DAY, a, b) FROM t"),
         ];
         for (dialect, sql) in cases {
             let function = function(sql);
@@ -685,7 +1035,22 @@ mod tests {
     #[test]
     fn unsupported_dialect_falls_back() {
         let function = function("SELECT DATE_DIFF(a, b, ISOWEEK) FROM t");
-        assert!(classify_function(Dialect::Generic, &function).is_none());
+        for dialect in [
+            Dialect::Generic,
+            Dialect::Ansi,
+            Dialect::PostgreSql,
+            Dialect::Hive,
+            Dialect::DuckDb,
+            Dialect::Trino,
+            Dialect::Spark,
+            Dialect::ClickHouse,
+            Dialect::SQLite,
+        ] {
+            assert!(
+                classify_function(dialect, &function).is_none(),
+                "unexpected temporal profile for {dialect:?}"
+            );
+        }
     }
 
     #[test]
@@ -765,6 +1130,11 @@ mod tests {
             (SNOWFLAKE_DATE_PART, "yearofweekiso"),
             (MYSQL_DATE_PART, "SQL_TSI_DAY"),
             (DATABRICKS_DATE_PART, "DAYOFYEAR"),
+            (REDSHIFT_ADD_DIFF_DATE_PART, "m"),
+            (REDSHIFT_ADD_DIFF_DATE_PART, "w"),
+            (REDSHIFT_ADD_DIFF_DATE_PART, "mon"),
+            (MSSQL_DATEPART_DATE_PART, "tz"),
+            (MSSQL_DATEPART_DATE_PART, "isoww"),
         ];
         for (grammar, alias) in aliases {
             assert!(
@@ -777,6 +1147,13 @@ mod tests {
         assert!(!MYSQL_DATE_PART.is_part_name("DAY_SECOND"));
         assert!(!DATABRICKS_DATE_PART.is_part_name("DAYOFWEEK"));
         assert!(!DATABRICKS_DATE_PART.is_part_name("WEEKOFYEAR"));
+        assert!(!REDSHIFT_ADD_DIFF_DATE_PART.is_part_name("mm"));
+        assert!(!REDSHIFT_ADD_DIFF_DATE_PART.is_part_name("wk"));
+        assert!(!REDSHIFT_ADD_DIFF_DATE_PART.is_part_name("DOW"));
+        assert!(REDSHIFT_DATE_PART.is_part_name("DOW"));
+        assert!(!REDSHIFT_DATE_PART.is_part_name("DAYOFYEAR"));
+        assert!(!MSSQL_DATE_BUCKET_DATE_PART.is_part_name("mcs"));
+        assert!(!MSSQL_DATETRUNC_DATE_PART.is_part_name("NANOSECOND"));
     }
 
     #[test]
@@ -814,5 +1191,62 @@ mod tests {
             &Expr::Identifier(sqlparser::ast::Ident::new("DAYOFYEAR")),
             diff_grammar
         ));
+    }
+
+    #[test]
+    fn redshift_and_mssql_profiles_keep_family_specific_static_parts() {
+        let redshift_part = function("SELECT DATE_PART(DOW, event_ts) FROM t");
+        let redshift_signature =
+            classify_function(Dialect::Redshift, &redshift_part).expect("Redshift DATE_PART");
+        let ArgumentSemantic::DatePart(redshift_grammar) = redshift_signature.arguments[0] else {
+            panic!("expected Redshift date-part role")
+        };
+        assert!(expression_is_static_date_part(
+            &Expr::Identifier(sqlparser::ast::Ident::new("DOW")),
+            redshift_grammar
+        ));
+        assert!(
+            classify_function(
+                Dialect::Redshift,
+                &function("SELECT DATE_TRUNC(event_ts, WEEK) FROM t")
+            )
+            .is_none()
+        );
+
+        let mssql_trunc = function("SELECT DATETRUNC(WEEK, event_ts) FROM t");
+        let mssql_signature =
+            classify_function(Dialect::MsSql, &mssql_trunc).expect("MsSql DATETRUNC");
+        let ArgumentSemantic::DatePart(mssql_grammar) = mssql_signature.arguments[0] else {
+            panic!("expected MsSql date-part role")
+        };
+        assert!(expression_is_static_date_part(
+            &Expr::Identifier(sqlparser::ast::Ident::new("WEEK")),
+            mssql_grammar
+        ));
+        for unsupported in ["WEEKDAY", "TZOFFSET", "NANOSECOND"] {
+            assert!(!expression_is_static_date_part(
+                &Expr::Identifier(sqlparser::ast::Ident::new(unsupported)),
+                mssql_grammar
+            ));
+        }
+        let mssql_dateadd = function("SELECT DATEADD(TZOFFSET, amount, event_ts) FROM t");
+        let ArgumentSemantic::DatePart(mssql_dateadd_grammar) =
+            classify_function(Dialect::MsSql, &mssql_dateadd)
+                .expect("MsSql DATEADD")
+                .arguments[0]
+        else {
+            panic!("expected MsSql DATEADD date-part role")
+        };
+        assert!(!expression_is_static_date_part(
+            &Expr::Identifier(sqlparser::ast::Ident::new("TZOFFSET")),
+            mssql_dateadd_grammar
+        ));
+        assert!(
+            classify_function(
+                Dialect::Spark,
+                &function("SELECT DATEDIFF(DAY, a, b) FROM t")
+            )
+            .is_none()
+        );
     }
 }

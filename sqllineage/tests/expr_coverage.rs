@@ -699,3 +699,189 @@ fn databricks_add_and_diff_have_distinct_date_part_grammars() {
         ]
     );
 }
+
+#[test]
+fn redshift_temporal_profiles_keep_date_part_functions_and_fallbacks() {
+    let result = analyze_with_dialect(
+        "SELECT DATEADD(day, amount, event_ts) AS added, DATEDIFF(week, start_ts, end_ts) AS elapsed, DATE_PART(dow, event_ts) AS weekday_value, PGDATE_PART(dow, event_ts) AS pg_weekday_value, DATE_PART(dayofyear, event_ts) AS dayofyear_unknown, DATEADD(m, amount, event_ts) AS minute_alias, DATEADD(w, amount, event_ts) AS week_alias, DATEADD(mon, amount, event_ts) AS month_alias, DATEADD(mm, amount, event_ts) AS sqlserver_month, DATEADD(wk, amount, event_ts) AS sqlserver_week, DATEADD(dynamic_part, amount, event_ts) AS dynamic_added, DATE_TRUNC('week', event_ts) AS truncated FROM events",
+        Dialect::Redshift,
+    );
+    assert_eq!(
+        concrete_sources(find_mapping(&result.columns.mappings, "added")),
+        vec![
+            ("events".into(), "amount".into()),
+            ("events".into(), "event_ts".into()),
+        ]
+    );
+    assert_eq!(
+        concrete_sources(find_mapping(&result.columns.mappings, "elapsed")),
+        vec![
+            ("events".into(), "end_ts".into()),
+            ("events".into(), "start_ts".into()),
+        ]
+    );
+    assert_eq!(
+        concrete_sources(find_mapping(&result.columns.mappings, "weekday_value")),
+        vec![("events".into(), "event_ts".into())]
+    );
+    assert_eq!(
+        concrete_sources(find_mapping(&result.columns.mappings, "pg_weekday_value")),
+        vec![("events".into(), "event_ts".into())]
+    );
+    assert_eq!(
+        concrete_sources(find_mapping(&result.columns.mappings, "dayofyear_unknown")),
+        vec![
+            ("events".into(), "dayofyear".into()),
+            ("events".into(), "event_ts".into()),
+        ]
+    );
+    for output in ["minute_alias", "week_alias", "month_alias"] {
+        assert_eq!(
+            concrete_sources(find_mapping(&result.columns.mappings, output)),
+            vec![
+                ("events".into(), "amount".into()),
+                ("events".into(), "event_ts".into()),
+            ]
+        );
+    }
+    assert_eq!(
+        concrete_sources(find_mapping(&result.columns.mappings, "sqlserver_month")),
+        vec![
+            ("events".into(), "amount".into()),
+            ("events".into(), "event_ts".into()),
+            ("events".into(), "mm".into()),
+        ]
+    );
+    assert_eq!(
+        concrete_sources(find_mapping(&result.columns.mappings, "sqlserver_week")),
+        vec![
+            ("events".into(), "amount".into()),
+            ("events".into(), "event_ts".into()),
+            ("events".into(), "wk".into()),
+        ]
+    );
+    assert_eq!(
+        concrete_sources(find_mapping(&result.columns.mappings, "dynamic_added")),
+        vec![
+            ("events".into(), "amount".into()),
+            ("events".into(), "dynamic_part".into()),
+            ("events".into(), "event_ts".into()),
+        ]
+    );
+    assert_eq!(
+        concrete_sources(find_mapping(&result.columns.mappings, "truncated")),
+        vec![("events".into(), "event_ts".into())]
+    );
+}
+
+#[test]
+fn mssql_temporal_profiles_keep_family_specific_date_parts() {
+    let result = analyze_with_dialect(
+        "SELECT DATEADD(day, amount, event_ts) AS added, DATEDIFF(weekday, start_ts, end_ts) AS elapsed, DATEDIFF_BIG(ns, start_ts, end_ts) AS big_elapsed, DATEPART(tzoffset, event_ts) AS offset_value, DATENAME(iso_week, event_ts) AS iso_name, DATETRUNC(week, event_ts) AS truncated, DATETRUNC(weekday, event_ts) AS weekday_truncated, DATE_BUCKET(day, 7, event_ts) AS bucketed, DATE_BUCKET(day, 7, event_ts, origin_ts) AS bucketed_with_origin, DATE_BUCKET(mcs, 7, event_ts) AS bucket_microsecond, DATEADD(dynamic_part, amount, event_ts) AS dynamic_added, DATEADD(unknown_part, amount, event_ts) AS unknown_added FROM events",
+        Dialect::MsSql,
+    );
+    assert_eq!(
+        concrete_sources(find_mapping(&result.columns.mappings, "added")),
+        vec![
+            ("events".into(), "amount".into()),
+            ("events".into(), "event_ts".into()),
+        ]
+    );
+    assert_eq!(
+        concrete_sources(find_mapping(&result.columns.mappings, "elapsed")),
+        vec![
+            ("events".into(), "end_ts".into()),
+            ("events".into(), "start_ts".into()),
+        ]
+    );
+    assert_eq!(
+        concrete_sources(find_mapping(&result.columns.mappings, "big_elapsed")),
+        vec![
+            ("events".into(), "end_ts".into()),
+            ("events".into(), "start_ts".into()),
+        ]
+    );
+    assert_eq!(
+        concrete_sources(find_mapping(&result.columns.mappings, "offset_value")),
+        vec![("events".into(), "event_ts".into())]
+    );
+    assert_eq!(
+        concrete_sources(find_mapping(&result.columns.mappings, "iso_name")),
+        vec![("events".into(), "event_ts".into())]
+    );
+    assert_eq!(
+        concrete_sources(find_mapping(&result.columns.mappings, "truncated")),
+        vec![("events".into(), "event_ts".into())]
+    );
+    assert_eq!(
+        concrete_sources(find_mapping(&result.columns.mappings, "weekday_truncated")),
+        vec![
+            ("events".into(), "event_ts".into()),
+            ("events".into(), "weekday".into()),
+        ]
+    );
+    assert_eq!(
+        concrete_sources(find_mapping(&result.columns.mappings, "bucketed")),
+        vec![("events".into(), "event_ts".into())]
+    );
+    assert_eq!(
+        concrete_sources(find_mapping(
+            &result.columns.mappings,
+            "bucketed_with_origin"
+        )),
+        vec![
+            ("events".into(), "event_ts".into()),
+            ("events".into(), "origin_ts".into()),
+        ]
+    );
+    assert_eq!(
+        concrete_sources(find_mapping(&result.columns.mappings, "bucket_microsecond")),
+        vec![
+            ("events".into(), "event_ts".into()),
+            ("events".into(), "mcs".into()),
+        ]
+    );
+    assert_eq!(
+        concrete_sources(find_mapping(&result.columns.mappings, "dynamic_added")),
+        vec![
+            ("events".into(), "amount".into()),
+            ("events".into(), "dynamic_part".into()),
+            ("events".into(), "event_ts".into()),
+        ]
+    );
+    assert_eq!(
+        concrete_sources(find_mapping(&result.columns.mappings, "unknown_added")),
+        vec![
+            ("events".into(), "amount".into()),
+            ("events".into(), "event_ts".into()),
+            ("events".into(), "unknown_part".into()),
+        ]
+    );
+}
+
+#[test]
+fn spark_temporal_functions_use_generic_value_fallback() {
+    let result = analyze_with_dialect(
+        "SELECT DATE_TRUNC('WEEK', event_ts) AS truncated, DATEDIFF(end_ts, start_ts) AS elapsed, DATEDIFF(DAY, start_ts, end_ts) AS nonstandard FROM events",
+        Dialect::Spark,
+    );
+    assert_eq!(
+        concrete_sources(find_mapping(&result.columns.mappings, "truncated")),
+        vec![("events".into(), "event_ts".into())]
+    );
+    assert_eq!(
+        concrete_sources(find_mapping(&result.columns.mappings, "elapsed")),
+        vec![
+            ("events".into(), "end_ts".into()),
+            ("events".into(), "start_ts".into()),
+        ]
+    );
+    assert_eq!(
+        concrete_sources(find_mapping(&result.columns.mappings, "nonstandard")),
+        vec![
+            ("events".into(), "DAY".into()),
+            ("events".into(), "end_ts".into()),
+            ("events".into(), "start_ts".into()),
+        ]
+    );
+}
