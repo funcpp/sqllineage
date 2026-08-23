@@ -221,15 +221,19 @@ fn resolve_scope_mappings(
                 match &graph.nodes[col.node_id] {
                     RawNode::Output { name, .. } => {
                         let mut visited = HashSet::new();
-                        let (sources, edge_kinds, has_back) = collect_output_sources(
-                            col.node_id,
-                            graph,
-                            resolved,
-                            incoming,
-                            &mut visited,
-                            catalog,
+                        let (sources, edge_kinds, has_back, inherited_transform) =
+                            collect_output_sources(
+                                col.node_id,
+                                graph,
+                                resolved,
+                                incoming,
+                                &mut visited,
+                                catalog,
+                            );
+                        let transform = merge_transform(
+                            &derive_transform(&graph.nodes[col.node_id], &edge_kinds),
+                            &inherited_transform,
                         );
-                        let transform = derive_transform(&graph.nodes[col.node_id], &edge_kinds);
                         mappings.push(ColumnMapping {
                             target: ColumnRef {
                                 table: output_table.cloned(),
@@ -518,7 +522,7 @@ fn expand_scope_columns(
             );
         } else {
             let mut visited = HashSet::new();
-            let (sources, edge_kinds, _) = collect_output_sources(
+            let (sources, edge_kinds, _, inherited_transform) = collect_output_sources(
                 col.node_id,
                 graph,
                 resolved,
@@ -526,7 +530,10 @@ fn expand_scope_columns(
                 &mut visited,
                 catalog,
             );
-            let transform = derive_transform(&graph.nodes[col.node_id], &edge_kinds);
+            let transform = merge_transform(
+                &derive_transform(&graph.nodes[col.node_id], &edge_kinds),
+                &inherited_transform,
+            );
             mappings.push(ColumnMapping {
                 target: ColumnRef {
                     table: output_table.cloned(),
@@ -549,10 +556,10 @@ fn scope_column_sources(
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
     catalog: Option<&dyn CatalogProvider>,
-) -> (Vec<ColumnOrigin>, Vec<EdgeKind>, bool) {
+) -> (Vec<ColumnOrigin>, Vec<EdgeKind>, bool, TransformKind) {
     let mappings = resolve_scope_mappings(scope, graph, resolved, incoming, None, catalog);
     let Some(mapping) = mappings.get(index) else {
-        return (vec![], vec![], false);
+        return (vec![], vec![], false, TransformKind::Direct);
     };
     let mut sources = Vec::new();
     let mut has_back = false;
@@ -565,7 +572,7 @@ fn scope_column_sources(
             source => sources.push(source.clone()),
         }
     }
-    (sources, vec![], has_back)
+    (sources, vec![], has_back, mapping.transform.clone())
 }
 
 fn collect_output_sources(
@@ -575,14 +582,15 @@ fn collect_output_sources(
     incoming: &[Vec<usize>],
     visited: &mut HashSet<NodeId>,
     catalog: Option<&dyn CatalogProvider>,
-) -> (Vec<ColumnOrigin>, Vec<EdgeKind>, bool) {
+) -> (Vec<ColumnOrigin>, Vec<EdgeKind>, bool, TransformKind) {
     if !visited.insert(node_id) {
-        return (vec![], vec![], false);
+        return (vec![], vec![], false, TransformKind::Direct);
     }
 
     let mut sources = Vec::new();
     let mut kinds = Vec::new();
     let mut has_back = false;
+    let mut inherited_transform = TransformKind::Direct;
 
     for &edge_idx in &incoming[node_id] {
         let edge = &graph.edges[edge_idx];
@@ -590,16 +598,17 @@ fn collect_output_sources(
             has_back = true;
             continue;
         }
-        let (sub_sources, sub_back) =
+        let (sub_sources, sub_back, sub_transform) =
             collect_leaf_origins(edge.from, graph, resolved, incoming, visited, catalog);
         for _ in &sub_sources {
             kinds.push(edge.kind.clone());
         }
         sources.extend(sub_sources);
         has_back |= sub_back;
+        inherited_transform = merge_transform(&inherited_transform, &sub_transform);
     }
 
-    (sources, kinds, has_back)
+    (sources, kinds, has_back, inherited_transform)
 }
 
 fn collect_leaf_origins(
@@ -609,11 +618,11 @@ fn collect_leaf_origins(
     incoming: &[Vec<usize>],
     visited: &mut HashSet<NodeId>,
     catalog: Option<&dyn CatalogProvider>,
-) -> (Vec<ColumnOrigin>, bool) {
-    if let Some((sources, has_back)) =
+) -> (Vec<ColumnOrigin>, bool, TransformKind) {
+    if let Some((sources, has_back, transform)) =
         resolve_named_scope_reference(node_id, graph, resolved, incoming, catalog)
     {
-        return (sources, has_back);
+        return (sources, has_back, transform);
     }
 
     if let Some((target_output, scope)) = find_cte_redirect(node_id, graph) {
@@ -624,24 +633,24 @@ fn collect_leaf_origins(
             .position(|c| c.node_id == target_output)
             && !matches!(graph.scopes.output_plan(scope), OutputPlan::Projection)
         {
-            let (sources, _, has_back) =
+            let (sources, _, has_back, transform) =
                 scope_column_sources(scope, index, graph, resolved, incoming, catalog);
-            return (sources, has_back);
+            return (sources, has_back, transform);
         }
-        let (sources, _, has_back) =
+        let (sources, _, has_back, transform) =
             collect_output_sources(target_output, graph, resolved, incoming, visited, catalog);
-        return (sources, has_back);
+        return (sources, has_back, transform);
     }
 
     if let RawNode::Output { .. } = &graph.nodes[node_id] {
-        let (sources, _, has_back) =
+        let (sources, _, has_back, transform) =
             collect_output_sources(node_id, graph, resolved, incoming, visited, catalog);
-        (sources, has_back)
+        (sources, has_back, transform)
     } else {
         let origin = resolve_node(node_id, graph, resolved, incoming, visited, catalog);
         match origin {
-            Some(o) => (vec![o], false),
-            None => (vec![], false),
+            Some(o) => (vec![o], false, TransformKind::Direct),
+            None => (vec![], false, TransformKind::Direct),
         }
     }
 }
@@ -655,7 +664,7 @@ fn resolve_named_scope_reference(
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
     catalog: Option<&dyn CatalogProvider>,
-) -> Option<(Vec<ColumnOrigin>, bool)> {
+) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
     let (name, qualifier, scope) = match &graph.nodes[node_id] {
         RawNode::Ref {
             name,
@@ -668,30 +677,48 @@ fn resolve_named_scope_reference(
     let binding = qualifier
         .and_then(|qualifier| graph.scopes.lookup(scope, qualifier).cloned())
         .or_else(|| find_single_binding(scope, graph));
-    let target_scope = match binding {
-        Some(Binding::Cte(target) | Binding::DerivedTable(target))
-            if !matches!(graph.scopes.output_plan(target), OutputPlan::Projection) =>
-        {
-            target
-        }
-        _ => return None,
+    let Some(Binding::Cte(target_scope) | Binding::DerivedTable(target_scope)) = binding else {
+        return None;
     };
     let mappings = resolve_scope_mappings(target_scope, graph, resolved, incoming, None, catalog);
-    let mapping = mappings
+    if let Some(mapping) = mappings
         .iter()
-        .find(|mapping| mapping.target.column == *name)?;
-    let mut sources = Vec::new();
+        .find(|mapping| mapping.target.column == *name)
+    {
+        let (sources, has_back) = flatten_mapping_sources(&mapping.sources);
+        return Some((sources, has_back, mapping.transform.clone()));
+    }
+    // A catalog-less star has no individual named mapping. Returning its
+    // wildcard origin is safer than falling through to a fabricated concrete
+    // source for a named reference through the CTE/derived scope.
+    let wildcard_sources = mappings
+        .iter()
+        .flat_map(|mapping| mapping.sources.iter())
+        .filter_map(|source| match source {
+            ColumnOrigin::Wildcard { .. } => Some(source.clone()),
+            ColumnOrigin::Recursive { base_sources } => base_sources
+                .iter()
+                .find(|source| matches!(source, ColumnOrigin::Wildcard { .. }))
+                .cloned(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    (!wildcard_sources.is_empty()).then_some((wildcard_sources, false, TransformKind::Direct))
+}
+
+fn flatten_mapping_sources(sources: &[ColumnOrigin]) -> (Vec<ColumnOrigin>, bool) {
+    let mut flattened = Vec::new();
     let mut has_back = false;
-    for source in &mapping.sources {
+    for source in sources {
         match source {
             ColumnOrigin::Recursive { base_sources } => {
-                sources.extend(base_sources.clone());
+                flattened.extend(base_sources.clone());
                 has_back = true;
             }
-            source => sources.push(source.clone()),
+            source => flattened.push(source.clone()),
         }
     }
-    Some((sources, has_back))
+    (flattened, has_back)
 }
 
 fn resolve_node(
@@ -883,13 +910,45 @@ fn resolve_through_scope(
     visited: &mut HashSet<NodeId>,
     catalog: Option<&dyn CatalogProvider>,
 ) -> Option<ColumnOrigin> {
+    // Resolve through the same expanded output mappings used by the public
+    // projection path. This is important for a qualified CTE/derived
+    // reference whose name was introduced by a catalog-expanded star.
+    let mappings = resolve_scope_mappings(target_scope, graph, resolved, incoming, None, catalog);
+    if let Some(mapping) = mappings
+        .iter()
+        .find(|mapping| mapping.target.column == column_name)
+    {
+        let (origins, has_back) = flatten_mapping_sources(&mapping.sources);
+        return if has_back {
+            Some(ColumnOrigin::Recursive {
+                base_sources: origins,
+            })
+        } else {
+            origins.into_iter().next()
+        };
+    }
+    if let Some(source) = mappings
+        .iter()
+        .flat_map(|mapping| mapping.sources.iter())
+        .find_map(|source| match source {
+            ColumnOrigin::Wildcard { .. } => Some(source.clone()),
+            ColumnOrigin::Recursive { base_sources } => base_sources
+                .iter()
+                .find(|source| matches!(source, ColumnOrigin::Wildcard { .. }))
+                .cloned(),
+            _ => None,
+        })
+    {
+        return Some(source);
+    }
+
     if let Some(col) = graph
         .scopes
         .output_columns(target_scope)
         .iter()
         .find(|c| c.name == column_name)
     {
-        let (origins, _, has_back) =
+        let (origins, _, has_back, _) =
             collect_output_sources(col.node_id, graph, resolved, incoming, visited, catalog);
         if has_back {
             Some(ColumnOrigin::Recursive {

@@ -318,6 +318,99 @@ fn named_lookup_through_set_operation_cte_keeps_all_branches() {
 }
 
 #[test]
+fn named_lookup_through_projection_cte_and_derived_star_chain() {
+    let sql = "WITH base AS (SELECT * FROM users), wrapped AS (SELECT * FROM base) \
+               SELECT name FROM (SELECT * FROM wrapped) derived";
+    let result = analyze(
+        sql,
+        AnalyzeOptions {
+            catalog: Some(Box::new(SetOperationCatalog)),
+            ..AnalyzeOptions::default()
+        },
+    )
+    .expect("parse")
+    .into_iter()
+    .next()
+    .unwrap();
+
+    assert_eq!(result.columns.mappings.len(), 1);
+    assert_eq!(
+        concrete_sources(&result.columns.mappings[0]),
+        vec![("users".into(), "name".into())]
+    );
+}
+
+#[test]
+fn named_lookup_through_unknown_projection_star_is_indeterminate() {
+    let result = analyze(
+        "WITH base AS (SELECT * FROM unknown) SELECT name FROM base",
+        AnalyzeOptions::default(),
+    )
+    .expect("parse")
+    .into_iter()
+    .next()
+    .unwrap();
+
+    assert_eq!(result.columns.mappings.len(), 1);
+    assert!(matches!(
+        result.columns.mappings[0].sources.as_slice(),
+        [ColumnOrigin::Wildcard { table }] if table.table == "unknown"
+    ));
+}
+
+#[test]
+fn named_lookup_through_projection_preserves_inner_transform() {
+    let result = analyze(
+        "WITH aggregated AS (SELECT SUM(amount) AS total FROM orders) \
+         SELECT total FROM aggregated",
+        AnalyzeOptions {
+            catalog: Some(Box::new(SetOperationCatalog)),
+            ..AnalyzeOptions::default()
+        },
+    )
+    .expect("parse")
+    .into_iter()
+    .next()
+    .unwrap();
+
+    assert_eq!(result.columns.mappings.len(), 1);
+    assert_eq!(
+        concrete_sources(&result.columns.mappings[0]),
+        vec![("orders".into(), "amount".into())]
+    );
+    assert_eq!(
+        result.columns.mappings[0].transform,
+        sqllineage::TransformKind::Aggregation
+    );
+}
+
+#[test]
+fn named_lookup_through_projection_preserves_inner_expression_transform() {
+    let result = analyze(
+        "WITH transformed AS (SELECT amount + 1 AS adjusted FROM orders) \
+         SELECT adjusted FROM transformed",
+        AnalyzeOptions {
+            catalog: Some(Box::new(SetOperationCatalog)),
+            ..AnalyzeOptions::default()
+        },
+    )
+    .expect("parse")
+    .into_iter()
+    .next()
+    .unwrap();
+
+    assert_eq!(result.columns.mappings.len(), 1);
+    assert_eq!(
+        concrete_sources(&result.columns.mappings[0]),
+        vec![("orders".into(), "amount".into())]
+    );
+    assert_eq!(
+        result.columns.mappings[0].transform,
+        sqllineage::TransformKind::Expression
+    );
+}
+
+#[test]
 fn catalog_known_set_arity_mismatch_is_an_analysis_error() {
     let result = analyze(
         "SELECT * FROM users UNION ALL SELECT a, b, c, d FROM other",
