@@ -82,6 +82,15 @@ fn select_aggregate() {
 }
 
 #[test]
+fn select_count_star_is_aggregation_without_sources() {
+    let result = analyze_one("SELECT COUNT(*) AS c FROM t");
+    let m = find_mapping(&result.columns.mappings, "c");
+
+    assert!(m.sources.is_empty());
+    assert_eq!(m.transform, TransformKind::Aggregation);
+}
+
+#[test]
 fn select_multiple_tables_qualified() {
     let result = analyze_one("SELECT t1.a, t2.b FROM t1 JOIN t2 ON t1.id = t2.id");
     assert_eq!(result.columns.mappings.len(), 2);

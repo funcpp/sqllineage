@@ -63,7 +63,7 @@ pub(crate) fn resolve(
                 let mut visited = HashSet::new();
                 let (sources, edge_kinds, has_back) =
                     collect_output_sources(node_id, &graph, &mut resolved, &incoming, &mut visited);
-                let transform = derive_transform(&edge_kinds);
+                let transform = derive_transform(&graph.nodes[node_id], &edge_kinds);
 
                 if has_back {
                     mappings.push(ColumnMapping {
@@ -183,7 +183,7 @@ fn expand_scope_columns(
             let mut visited = HashSet::new();
             let (sources, edge_kinds, _) =
                 collect_output_sources(col.node_id, graph, resolved, incoming, &mut visited);
-            let transform = derive_transform(&edge_kinds);
+            let transform = derive_transform(&graph.nodes[col.node_id], &edge_kinds);
             mappings.push(ColumnMapping {
                 target: ColumnRef {
                     table: output_table.cloned(),
@@ -451,7 +451,16 @@ fn resolve_through_scope(
     }
 }
 
-fn derive_transform(kinds: &[EdgeKind]) -> TransformKind {
+fn derive_transform(node: &RawNode, edge_kinds: &[EdgeKind]) -> TransformKind {
+    let kinds = if edge_kinds.is_empty() {
+        match node {
+            RawNode::Output { intrinsic_kind, .. } => std::slice::from_ref(intrinsic_kind),
+            _ => edge_kinds,
+        }
+    } else {
+        edge_kinds
+    };
+
     if kinds.iter().any(|k| matches!(k, EdgeKind::ViaAggregation)) {
         TransformKind::Aggregation
     } else if kinds.iter().any(|k| matches!(k, EdgeKind::ViaConditional)) {
