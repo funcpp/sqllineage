@@ -1,4 +1,5 @@
 pub(crate) mod expr;
+pub(crate) mod function_semantics;
 pub(crate) mod query;
 pub(crate) mod select;
 pub(crate) mod statement;

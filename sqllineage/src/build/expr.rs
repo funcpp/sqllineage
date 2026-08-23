@@ -1,6 +1,7 @@
 use sqlparser::ast::{self, AccessExpr, Expr, FunctionArguments, Subscript, WindowType};
 
 use crate::build::LineageBuilder;
+use crate::build::function_semantics::{self, ArgumentSemantic};
 use crate::graph::edge::EdgeKind;
 use crate::graph::node::NodeId;
 use crate::graph::scope::{Binding, ScopeKind};
@@ -222,15 +223,30 @@ impl LineageBuilder {
             Expr::Function(func) => {
                 let mut ancestors = Vec::new();
                 if let FunctionArguments::List(list) = &func.args {
-                    for arg in &list.args {
-                        match arg {
+                    let semantics = function_semantics::classify_function(self.dialect, func)
+                        .map(|signature| signature.arguments);
+                    for (index, arg) in list.args.iter().enumerate() {
+                        let arg_expr = match arg {
                             ast::FunctionArg::Unnamed(arg_expr)
                             | ast::FunctionArg::Named { arg: arg_expr, .. }
-                            | ast::FunctionArg::ExprNamed { arg: arg_expr, .. } => {
-                                if let ast::FunctionArgExpr::Expr(e) = arg_expr {
-                                    ancestors.extend(self.collect_ancestors(e));
-                                }
-                            }
+                            | ast::FunctionArg::ExprNamed { arg: arg_expr, .. } => arg_expr,
+                        };
+                        let ast::FunctionArgExpr::Expr(expr) = arg_expr else {
+                            continue;
+                        };
+                        let is_static_syntax = semantics
+                            .and_then(|semantics| semantics.get(index))
+                            .is_some_and(|semantic| {
+                                matches!(
+                                    semantic,
+                                    ArgumentSemantic::DatePart(grammar)
+                                        if function_semantics::expression_is_static_date_part(
+                                            expr, *grammar
+                                        )
+                                )
+                            });
+                        if !is_static_syntax {
+                            ancestors.extend(self.collect_ancestors(expr));
                         }
                     }
                 }
