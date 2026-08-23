@@ -1,4 +1,4 @@
-use sqlparser::ast::{self, Expr, FunctionArguments, WindowType};
+use sqlparser::ast::{self, AccessExpr, Expr, FunctionArguments, Subscript, WindowType};
 
 use crate::build::LineageBuilder;
 use crate::build::select::split_compound;
@@ -198,7 +198,9 @@ impl LineageBuilder {
                 v
             }
 
-            Expr::CompoundFieldAccess { root, .. } => self.collect_ancestors(root),
+            Expr::CompoundFieldAccess { root, access_chain } => {
+                self.collect_compound_field_ancestors(root, access_chain)
+            }
             Expr::JsonAccess { value, .. } => self.collect_ancestors(value),
 
             Expr::Function(func) => {
@@ -298,6 +300,73 @@ impl LineageBuilder {
             | Expr::Interval(_)
             | Expr::Lambda(_)
             | Expr::MatchAgainst { .. } => vec![],
+        }
+    }
+
+    /// Collect the physical column at the root of a structured access chain.
+    ///
+    /// `base.items[0]` is ambiguous at the syntax level: `base` can be a
+    /// visible relation binding, in which case `items` is its physical column,
+    /// or it can be an unqualified top-level column (`payload.items[0]`). The
+    /// scope binding, rather than rendered SQL text or dialect-specific names,
+    /// is the structural distinction between those cases.
+    fn collect_compound_field_ancestors(
+        &mut self,
+        root: &Expr,
+        access_chain: &[AccessExpr],
+    ) -> Vec<NodeId> {
+        let mut ancestors = match (root, access_chain.first()) {
+            (Expr::Identifier(binding), Some(AccessExpr::Dot(Expr::Identifier(field))))
+                if self
+                    .graph
+                    .scopes
+                    .lookup(self.current_scope, &binding.value)
+                    .is_some() =>
+            {
+                let node = self.graph.add_ref(
+                    field.value.clone(),
+                    Some(binding.value.clone()),
+                    self.current_scope,
+                );
+                vec![node]
+            }
+            (Expr::Identifier(column), Some(AccessExpr::Dot(Expr::Identifier(_)))) => {
+                vec![
+                    self.graph
+                        .add_unqualified(column.value.clone(), self.current_scope),
+                ]
+            }
+            _ => self.collect_ancestors(root),
+        };
+
+        for access in access_chain {
+            if let AccessExpr::Subscript(subscript) = access {
+                ancestors.extend(self.collect_subscript_ancestors(subscript));
+            }
+        }
+        ancestors
+    }
+
+    fn collect_subscript_ancestors(&mut self, subscript: &Subscript) -> Vec<NodeId> {
+        match subscript {
+            Subscript::Index { index } => self.collect_ancestors(index),
+            Subscript::Slice {
+                lower_bound,
+                upper_bound,
+                stride,
+            } => {
+                let mut ancestors = Vec::new();
+                if let Some(lower) = lower_bound {
+                    ancestors.extend(self.collect_ancestors(lower));
+                }
+                if let Some(upper) = upper_bound {
+                    ancestors.extend(self.collect_ancestors(upper));
+                }
+                if let Some(step) = stride {
+                    ancestors.extend(self.collect_ancestors(step));
+                }
+                ancestors
+            }
         }
     }
 }

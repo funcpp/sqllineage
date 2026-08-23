@@ -1,7 +1,21 @@
 mod common;
 
 use common::{analyze_one, concrete_sources, find_mapping};
-use sqllineage::TransformKind;
+use sqllineage::{AnalyzeOptions, Dialect, TransformKind, analyze};
+
+fn analyze_with_dialect(sql: &str, dialect: Dialect) -> sqllineage::AnalyzeResult {
+    analyze(
+        sql,
+        AnalyzeOptions {
+            dialect,
+            ..AnalyzeOptions::default()
+        },
+    )
+    .expect("SQL should parse")
+    .into_iter()
+    .next()
+    .unwrap_or_default()
+}
 
 #[test]
 fn extract_year() {
@@ -106,4 +120,69 @@ fn json_access() {
     let result = analyze_one("SELECT data->>'key' AS val FROM t");
     let m = find_mapping(&result.columns.mappings, "val");
     assert_eq!(concrete_sources(m), vec![("t".into(), "data".into())]);
+}
+
+#[test]
+fn qualified_compound_field_access_uses_binding_column() {
+    let result = analyze_one("SELECT base.items_array[1] AS item FROM actual_table AS base");
+    let m = find_mapping(&result.columns.mappings, "item");
+    assert_eq!(
+        concrete_sources(m),
+        vec![("actual_table".into(), "items_array".into())]
+    );
+}
+
+#[test]
+fn compound_field_access_retains_column_dependent_index() {
+    let result = analyze_one("SELECT base.items_array[idx] AS item FROM actual_table AS base");
+    let m = find_mapping(&result.columns.mappings, "item");
+    assert_eq!(
+        concrete_sources(m),
+        vec![
+            ("actual_table".into(), "idx".into()),
+            ("actual_table".into(), "items_array".into()),
+        ]
+    );
+}
+
+#[test]
+fn nested_qualified_compound_field_access_keeps_top_level_column() {
+    let result = analyze_one("SELECT base.payload.items[1] AS item FROM actual_table AS base");
+    let m = find_mapping(&result.columns.mappings, "item");
+    assert_eq!(
+        concrete_sources(m),
+        vec![("actual_table".into(), "payload".into())]
+    );
+}
+
+#[test]
+fn cte_compound_field_access_uses_cte_binding_column() {
+    let result = analyze_one(
+        "WITH base AS (SELECT items_array FROM actual_table) SELECT base.items_array[1] AS item FROM base",
+    );
+    let m = find_mapping(&result.columns.mappings, "item");
+    assert_eq!(
+        concrete_sources(m),
+        vec![("actual_table".into(), "items_array".into())]
+    );
+}
+
+#[test]
+fn unqualified_compound_field_access_uses_top_level_column() {
+    let result = analyze_one("SELECT payload.items[1] AS item FROM t");
+    let m = find_mapping(&result.columns.mappings, "item");
+    assert_eq!(concrete_sources(m), vec![("t".into(), "payload".into())]);
+}
+
+#[test]
+fn bigquery_offset_compound_field_access_uses_binding_column() {
+    let result = analyze_with_dialect(
+        "SELECT base.items_array[OFFSET(0)] AS item FROM actual_table AS base",
+        Dialect::BigQuery,
+    );
+    let m = find_mapping(&result.columns.mappings, "item");
+    assert_eq!(
+        concrete_sources(m),
+        vec![("actual_table".into(), "items_array".into())]
+    );
 }
