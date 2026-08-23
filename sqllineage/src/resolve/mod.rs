@@ -1,7 +1,10 @@
 mod catalog;
 mod topo;
 
-use std::collections::HashSet;
+#[cfg(test)]
+use std::cell::Cell;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::graph::RawGraph;
 use crate::graph::edge::EdgeKind;
@@ -56,14 +59,26 @@ pub(crate) fn resolve(
 
     let root = ScopeTree::root();
     let output_table = graph.tables.output.clone();
-    let mappings = resolve_scope_mappings(
+    let mut mapping_cache = ScopeMappingCache::default();
+    // Scope mappings are cached in canonical form without an output table.
+    // Internal CTE/derived references need that form, while the root output
+    // table is only presentation metadata and is attached once here. Keeping
+    // it out of the cache key avoids materializing the same scope once per
+    // output column and cannot alter source resolution.
+    let mut mappings = resolve_scope_mappings(
         root,
         &graph,
         &mut resolved,
         &incoming,
-        output_table.as_ref(),
         catalog,
-    );
+        &mut mapping_cache,
+    )
+    .iter()
+    .cloned()
+    .collect::<Vec<_>>();
+    for mapping in &mut mappings {
+        mapping.target.table.clone_from(&output_table);
+    }
 
     Ok(AnalyzeResult {
         statement_type,
@@ -202,6 +217,31 @@ fn wildcard_mapping(output_table: Option<&TableRef>, source_table: TableRef) -> 
     }
 }
 
+#[derive(Default)]
+struct ScopeMappingCache {
+    entries: HashMap<usize, ScopeMappingEntry>,
+}
+
+enum ScopeMappingEntry {
+    Computing,
+    Resolved(Arc<[ColumnMapping]>),
+}
+
+#[cfg(test)]
+thread_local! {
+    static SCOPE_MAPPING_COMPUTATIONS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_scope_mapping_stats() {
+    SCOPE_MAPPING_COMPUTATIONS.with(|computations| computations.set(0));
+}
+
+#[cfg(test)]
+fn scope_mapping_computations() -> usize {
+    SCOPE_MAPPING_COMPUTATIONS.with(Cell::get)
+}
+
 /// Resolve a scope's output plan into ordered mappings. Set-operation
 /// branches are resolved independently so catalog expansion happens before
 /// their positional merge.
@@ -211,10 +251,26 @@ fn resolve_scope_mappings(
     graph: &RawGraph,
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
-    output_table: Option<&TableRef>,
     catalog: Option<&dyn CatalogProvider>,
-) -> Vec<ColumnMapping> {
-    match graph.scopes.output_plan(scope).clone() {
+    mapping_cache: &mut ScopeMappingCache,
+) -> Arc<[ColumnMapping]> {
+    if let Some(entry) = mapping_cache.entries.get(&scope) {
+        return match entry {
+            ScopeMappingEntry::Resolved(mappings) => mappings.clone(),
+            // A recursive scope cannot safely publish a partially materialized
+            // result. Returning no mappings preserves the existing fallback to
+            // raw output resolution and, importantly, does not cache an
+            // incomplete entry as resolved.
+            ScopeMappingEntry::Computing => Arc::from([]),
+        };
+    }
+    mapping_cache
+        .entries
+        .insert(scope, ScopeMappingEntry::Computing);
+    #[cfg(test)]
+    SCOPE_MAPPING_COMPUTATIONS.with(|computations| computations.set(computations.get() + 1));
+
+    let mappings = match graph.scopes.output_plan(scope).clone() {
         OutputPlan::Projection => {
             let mut mappings = Vec::new();
             for col in graph.scopes.output_columns(scope) {
@@ -229,6 +285,7 @@ fn resolve_scope_mappings(
                                 incoming,
                                 &mut visited,
                                 catalog,
+                                mapping_cache,
                             );
                         let transform = merge_transform(
                             &derive_transform(&graph.nodes[col.node_id], &edge_kinds),
@@ -236,7 +293,7 @@ fn resolve_scope_mappings(
                         );
                         mappings.push(ColumnMapping {
                             target: ColumnRef {
-                                table: output_table.cloned(),
+                                table: None,
                                 column: name.clone(),
                             },
                             sources: if has_back {
@@ -256,7 +313,7 @@ fn resolve_scope_mappings(
                         resolved,
                         incoming,
                         catalog,
-                        output_table,
+                        mapping_cache,
                         &mut mappings,
                         &mut HashSet::new(),
                     ),
@@ -269,7 +326,10 @@ fn resolve_scope_mappings(
             mappings
         }
         OutputPlan::Delegate(child) => {
-            resolve_scope_mappings(child, graph, resolved, incoming, output_table, catalog)
+            resolve_scope_mappings(child, graph, resolved, incoming, catalog, mapping_cache)
+                .iter()
+                .cloned()
+                .collect()
         }
         OutputPlan::SetOperation {
             left,
@@ -277,11 +337,17 @@ fn resolve_scope_mappings(
             recursive,
         } => {
             let left_mappings =
-                resolve_scope_mappings(left, graph, resolved, incoming, output_table, catalog);
+                resolve_scope_mappings(left, graph, resolved, incoming, catalog, mapping_cache)
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>();
             let right_mappings = if recursive {
                 Vec::new()
             } else {
-                resolve_scope_mappings(right, graph, resolved, incoming, output_table, catalog)
+                resolve_scope_mappings(right, graph, resolved, incoming, catalog, mapping_cache)
+                    .iter()
+                    .cloned()
+                    .collect()
             };
             // A wildcard without catalog metadata is a variable-width slot.
             // Positional alignment at or after it would fabricate an ordinal
@@ -292,37 +358,43 @@ fn resolve_scope_mappings(
                 && (mappings_have_unknown_shape(&left_mappings)
                     || mappings_have_unknown_shape(&right_mappings))
             {
-                return merge_unknown_shape_mappings(left_mappings, right_mappings);
-            }
-            // The branch resolvers expand stars independently. Preserve the
-            // left branch's names and order, as SQL set operations do.
-            let mut merged = Vec::with_capacity(left_mappings.len());
-            for (idx, left_mapping) in left_mappings.into_iter().enumerate() {
-                let mut sources = left_mapping.sources;
-                let mut transform = left_mapping.transform.clone();
-                if let Some(right_mapping) = right_mappings.get(idx) {
-                    sources.extend(right_mapping.sources.clone());
-                    transform = merge_transform(&transform, &right_mapping.transform);
+                merge_unknown_shape_mappings(left_mappings, right_mappings)
+            } else {
+                // The branch resolvers expand stars independently. Preserve the
+                // left branch's names and order, as SQL set operations do.
+                let mut merged = Vec::with_capacity(left_mappings.len());
+                for (idx, left_mapping) in left_mappings.into_iter().enumerate() {
+                    let mut sources = left_mapping.sources;
+                    let mut transform = left_mapping.transform.clone();
+                    if let Some(right_mapping) = right_mappings.get(idx) {
+                        sources.extend(right_mapping.sources.clone());
+                        transform = merge_transform(&transform, &right_mapping.transform);
+                    }
+                    if recursive {
+                        merged.push(ColumnMapping {
+                            target: left_mapping.target,
+                            sources: vec![ColumnOrigin::Recursive {
+                                base_sources: sources,
+                            }],
+                            transform,
+                        });
+                    } else {
+                        merged.push(ColumnMapping {
+                            target: left_mapping.target,
+                            sources,
+                            transform,
+                        });
+                    }
                 }
-                if recursive {
-                    merged.push(ColumnMapping {
-                        target: left_mapping.target,
-                        sources: vec![ColumnOrigin::Recursive {
-                            base_sources: sources,
-                        }],
-                        transform,
-                    });
-                } else {
-                    merged.push(ColumnMapping {
-                        target: left_mapping.target,
-                        sources,
-                        transform,
-                    });
-                }
+                merged
             }
-            merged
         }
-    }
+    };
+    let mappings: Arc<[ColumnMapping]> = mappings.into();
+    mapping_cache
+        .entries
+        .insert(scope, ScopeMappingEntry::Resolved(mappings.clone()));
+    mappings
 }
 
 fn mappings_have_unknown_shape(mappings: &[ColumnMapping]) -> bool {
@@ -445,7 +517,7 @@ fn expand_star(
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
     catalog: Option<&dyn CatalogProvider>,
-    output_table: Option<&TableRef>,
+    mapping_cache: &mut ScopeMappingCache,
     mappings: &mut Vec<ColumnMapping>,
     visited_scopes: &mut HashSet<usize>,
 ) {
@@ -458,17 +530,17 @@ fn expand_star(
                 resolved,
                 incoming,
                 catalog,
-                output_table,
+                mapping_cache,
                 mappings,
                 visited_scopes,
             );
         } else {
-            mappings.push(wildcard_mapping(output_table, t.clone()));
+            mappings.push(wildcard_mapping(None, t.clone()));
         }
     } else {
         for (_, binding) in effective_bindings(scope, graph) {
             match binding {
-                Binding::Table(tref) => mappings.push(wildcard_mapping(output_table, tref)),
+                Binding::Table(tref) => mappings.push(wildcard_mapping(None, tref)),
                 Binding::Cte(s) | Binding::DerivedTable(s) => {
                     expand_scope_columns(
                         s,
@@ -476,7 +548,7 @@ fn expand_star(
                         resolved,
                         incoming,
                         catalog,
-                        output_table,
+                        mapping_cache,
                         mappings,
                         visited_scopes,
                     );
@@ -490,7 +562,7 @@ fn expand_star(
                 resolved,
                 incoming,
                 catalog,
-                output_table,
+                mapping_cache,
                 mappings,
                 visited_scopes,
             );
@@ -506,7 +578,7 @@ fn expand_scope_columns(
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
     catalog: Option<&dyn CatalogProvider>,
-    output_table: Option<&TableRef>,
+    mapping_cache: &mut ScopeMappingCache,
     mappings: &mut Vec<ColumnMapping>,
     visited_scopes: &mut HashSet<usize>,
 ) {
@@ -514,9 +586,9 @@ fn expand_scope_columns(
         return;
     }
     if !matches!(graph.scopes.output_plan(scope_id), OutputPlan::Projection) {
-        let mut nested =
-            resolve_scope_mappings(scope_id, graph, resolved, incoming, output_table, catalog);
-        mappings.append(&mut nested);
+        let nested =
+            resolve_scope_mappings(scope_id, graph, resolved, incoming, catalog, mapping_cache);
+        mappings.extend(nested.iter().cloned());
         return;
     }
     for col in graph.scopes.output_columns(scope_id) {
@@ -528,7 +600,7 @@ fn expand_scope_columns(
                 resolved,
                 incoming,
                 catalog,
-                output_table,
+                mapping_cache,
                 mappings,
                 visited_scopes,
             );
@@ -541,6 +613,7 @@ fn expand_scope_columns(
                 incoming,
                 &mut visited,
                 catalog,
+                mapping_cache,
             );
             let transform = merge_transform(
                 &derive_transform(&graph.nodes[col.node_id], &edge_kinds),
@@ -548,7 +621,7 @@ fn expand_scope_columns(
             );
             mappings.push(ColumnMapping {
                 target: ColumnRef {
-                    table: output_table.cloned(),
+                    table: None,
                     column: col.name.clone(),
                 },
                 sources,
@@ -568,8 +641,9 @@ fn scope_column_sources(
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
     catalog: Option<&dyn CatalogProvider>,
+    mapping_cache: &mut ScopeMappingCache,
 ) -> (Vec<ColumnOrigin>, Vec<EdgeKind>, bool, TransformKind) {
-    let mappings = resolve_scope_mappings(scope, graph, resolved, incoming, None, catalog);
+    let mappings = resolve_scope_mappings(scope, graph, resolved, incoming, catalog, mapping_cache);
     let Some(mapping) = mappings.get(index) else {
         return (vec![], vec![], false, TransformKind::Direct);
     };
@@ -594,6 +668,7 @@ fn collect_output_sources(
     incoming: &[Vec<usize>],
     visited: &mut HashSet<NodeId>,
     catalog: Option<&dyn CatalogProvider>,
+    mapping_cache: &mut ScopeMappingCache,
 ) -> (Vec<ColumnOrigin>, Vec<EdgeKind>, bool, TransformKind) {
     if !visited.insert(node_id) {
         return (vec![], vec![], false, TransformKind::Direct);
@@ -610,8 +685,15 @@ fn collect_output_sources(
             has_back = true;
             continue;
         }
-        let (sub_sources, sub_back, sub_transform) =
-            collect_leaf_origins(edge.from, graph, resolved, incoming, visited, catalog);
+        let (sub_sources, sub_back, sub_transform) = collect_leaf_origins(
+            edge.from,
+            graph,
+            resolved,
+            incoming,
+            visited,
+            catalog,
+            mapping_cache,
+        );
         for _ in &sub_sources {
             kinds.push(edge.kind.clone());
         }
@@ -630,9 +712,10 @@ fn collect_leaf_origins(
     incoming: &[Vec<usize>],
     visited: &mut HashSet<NodeId>,
     catalog: Option<&dyn CatalogProvider>,
+    mapping_cache: &mut ScopeMappingCache,
 ) -> (Vec<ColumnOrigin>, bool, TransformKind) {
     if let Some((sources, has_back, transform)) =
-        resolve_named_scope_reference(node_id, graph, resolved, incoming, catalog)
+        resolve_named_scope_reference(node_id, graph, resolved, incoming, catalog, mapping_cache)
     {
         return (sources, has_back, transform);
     }
@@ -645,21 +728,50 @@ fn collect_leaf_origins(
             .position(|c| c.node_id == target_output)
             && !matches!(graph.scopes.output_plan(scope), OutputPlan::Projection)
         {
-            let (sources, _, has_back, transform) =
-                scope_column_sources(scope, index, graph, resolved, incoming, catalog);
+            let (sources, _, has_back, transform) = scope_column_sources(
+                scope,
+                index,
+                graph,
+                resolved,
+                incoming,
+                catalog,
+                mapping_cache,
+            );
             return (sources, has_back, transform);
         }
-        let (sources, _, has_back, transform) =
-            collect_output_sources(target_output, graph, resolved, incoming, visited, catalog);
+        let (sources, _, has_back, transform) = collect_output_sources(
+            target_output,
+            graph,
+            resolved,
+            incoming,
+            visited,
+            catalog,
+            mapping_cache,
+        );
         return (sources, has_back, transform);
     }
 
     if let RawNode::Output { .. } = &graph.nodes[node_id] {
-        let (sources, _, has_back, transform) =
-            collect_output_sources(node_id, graph, resolved, incoming, visited, catalog);
+        let (sources, _, has_back, transform) = collect_output_sources(
+            node_id,
+            graph,
+            resolved,
+            incoming,
+            visited,
+            catalog,
+            mapping_cache,
+        );
         (sources, has_back, transform)
     } else {
-        let origin = resolve_node(node_id, graph, resolved, incoming, visited, catalog);
+        let origin = resolve_node(
+            node_id,
+            graph,
+            resolved,
+            incoming,
+            visited,
+            catalog,
+            mapping_cache,
+        );
         match origin {
             Some(o) => (vec![o], false, TransformKind::Direct),
             None => (vec![], false, TransformKind::Direct),
@@ -676,6 +788,7 @@ fn resolve_named_scope_reference(
     resolved: &mut Vec<Option<ColumnOrigin>>,
     incoming: &[Vec<usize>],
     catalog: Option<&dyn CatalogProvider>,
+    mapping_cache: &mut ScopeMappingCache,
 ) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
     let (name, qualifier, scope) = match &graph.nodes[node_id] {
         RawNode::Ref {
@@ -692,7 +805,14 @@ fn resolve_named_scope_reference(
     let Some(Binding::Cte(target_scope) | Binding::DerivedTable(target_scope)) = binding else {
         return None;
     };
-    let mappings = resolve_scope_mappings(target_scope, graph, resolved, incoming, None, catalog);
+    let mappings = resolve_scope_mappings(
+        target_scope,
+        graph,
+        resolved,
+        incoming,
+        catalog,
+        mapping_cache,
+    );
     if let Some(mapping) = mappings
         .iter()
         .find(|mapping| mapping.target.column == *name)
@@ -740,6 +860,7 @@ fn resolve_node(
     incoming: &[Vec<usize>],
     visited: &mut HashSet<NodeId>,
     catalog: Option<&dyn CatalogProvider>,
+    mapping_cache: &mut ScopeMappingCache,
 ) -> Option<ColumnOrigin> {
     if let Some(ref origin) = resolved[node_id] {
         return Some(origin.clone());
@@ -760,7 +881,14 @@ fn resolve_node(
                     }),
                     Some(Binding::Cte(cte_scope) | Binding::DerivedTable(cte_scope)) => {
                         resolve_through_scope(
-                            name, cte_scope, graph, resolved, incoming, visited, catalog,
+                            name,
+                            cte_scope,
+                            graph,
+                            resolved,
+                            incoming,
+                            visited,
+                            catalog,
+                            mapping_cache,
                         )
                     }
                     None => Some(ColumnOrigin::Concrete {
@@ -769,13 +897,29 @@ fn resolve_node(
                     }),
                 }
             } else {
-                resolve_unqualified(name, *scope, graph, resolved, incoming, visited, catalog)
+                resolve_unqualified(
+                    name,
+                    *scope,
+                    graph,
+                    resolved,
+                    incoming,
+                    visited,
+                    catalog,
+                    mapping_cache,
+                )
             }
         }
 
-        RawNode::Unqualified { name, scope } => {
-            resolve_unqualified(name, *scope, graph, resolved, incoming, visited, catalog)
-        }
+        RawNode::Unqualified { name, scope } => resolve_unqualified(
+            name,
+            *scope,
+            graph,
+            resolved,
+            incoming,
+            visited,
+            catalog,
+            mapping_cache,
+        ),
 
         RawNode::Star { table, .. } => table
             .as_ref()
@@ -835,6 +979,7 @@ fn find_single_binding(scope: usize, graph: &RawGraph) -> Option<Binding> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_unqualified(
     name: &str,
     scope: usize,
@@ -843,6 +988,7 @@ fn resolve_unqualified(
     incoming: &[Vec<usize>],
     visited: &mut HashSet<NodeId>,
     catalog: Option<&dyn CatalogProvider>,
+    mapping_cache: &mut ScopeMappingCache,
 ) -> Option<ColumnOrigin> {
     resolve_from_bindings(
         name,
@@ -852,9 +998,11 @@ fn resolve_unqualified(
         incoming,
         visited,
         catalog,
+        mapping_cache,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_from_bindings(
     name: &str,
     bindings: &[(String, Binding)],
@@ -863,6 +1011,7 @@ fn resolve_from_bindings(
     incoming: &[Vec<usize>],
     visited: &mut HashSet<NodeId>,
     catalog: Option<&dyn CatalogProvider>,
+    mapping_cache: &mut ScopeMappingCache,
 ) -> Option<ColumnOrigin> {
     if bindings.len() == 1 {
         let (_, binding) = &bindings[0];
@@ -872,7 +1021,14 @@ fn resolve_from_bindings(
                 column: name.to_string(),
             }),
             Binding::Cte(cte_scope) | Binding::DerivedTable(cte_scope) => resolve_through_scope(
-                name, *cte_scope, graph, resolved, incoming, visited, catalog,
+                name,
+                *cte_scope,
+                graph,
+                resolved,
+                incoming,
+                visited,
+                catalog,
+                mapping_cache,
             ),
         }
     } else if bindings.is_empty() {
@@ -892,7 +1048,14 @@ fn resolve_from_bindings(
                         .any(|c| c.name == name)
                     {
                         return resolve_through_scope(
-                            name, *s, graph, resolved, incoming, visited, catalog,
+                            name,
+                            *s,
+                            graph,
+                            resolved,
+                            incoming,
+                            visited,
+                            catalog,
+                            mapping_cache,
                         );
                     }
                 }
@@ -913,6 +1076,7 @@ fn resolve_from_bindings(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_through_scope(
     column_name: &str,
     target_scope: usize,
@@ -921,11 +1085,19 @@ fn resolve_through_scope(
     incoming: &[Vec<usize>],
     visited: &mut HashSet<NodeId>,
     catalog: Option<&dyn CatalogProvider>,
+    mapping_cache: &mut ScopeMappingCache,
 ) -> Option<ColumnOrigin> {
     // Resolve through the same expanded output mappings used by the public
     // projection path. This is important for a qualified CTE/derived
     // reference whose name was introduced by a catalog-expanded star.
-    let mappings = resolve_scope_mappings(target_scope, graph, resolved, incoming, None, catalog);
+    let mappings = resolve_scope_mappings(
+        target_scope,
+        graph,
+        resolved,
+        incoming,
+        catalog,
+        mapping_cache,
+    );
     if let Some(mapping) = mappings
         .iter()
         .find(|mapping| mapping.target.column == column_name)
@@ -960,8 +1132,15 @@ fn resolve_through_scope(
         .iter()
         .find(|c| c.name == column_name)
     {
-        let (origins, _, has_back, _) =
-            collect_output_sources(col.node_id, graph, resolved, incoming, visited, catalog);
+        let (origins, _, has_back, _) = collect_output_sources(
+            col.node_id,
+            graph,
+            resolved,
+            incoming,
+            visited,
+            catalog,
+            mapping_cache,
+        );
         if has_back {
             Some(ColumnOrigin::Recursive {
                 base_sources: origins,
@@ -1000,5 +1179,58 @@ fn derive_transform(node: &RawNode, edge_kinds: &[EdgeKind]) -> TransformKind {
         TransformKind::Expression
     } else {
         TransformKind::Direct
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{reset_scope_mapping_stats, scope_mapping_computations};
+    use crate::analyze;
+    use crate::types::{AnalyzeOptions, ColumnOrigin, Dialect};
+
+    #[test]
+    fn explicit_projection_reuses_scope_mappings() {
+        let columns = (0..10).map(|index| format!("c{index}")).collect::<Vec<_>>();
+        let names = columns.join(", ");
+        let base_projection = (0..10)
+            .map(|index| format!("id + 1 AS c{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "WITH base AS (SELECT {base_projection} FROM external_table), \
+             cte0 AS (SELECT {names} FROM base), \
+             cte1 AS (SELECT {names} FROM cte0), \
+             cte2 AS (SELECT {names} FROM cte1), \
+             cte3 AS (SELECT {names} FROM cte2), \
+             cte4 AS (SELECT {names} FROM cte3) \
+             SELECT {names} FROM cte4"
+        );
+
+        reset_scope_mapping_stats();
+        let results = analyze(
+            &sql,
+            AnalyzeOptions {
+                dialect: Dialect::Generic,
+                ..Default::default()
+            },
+        )
+        .expect("explicit projection should resolve");
+
+        assert_eq!(results.len(), 1);
+        let mappings = &results[0].columns.mappings;
+        assert_eq!(mappings.len(), 10);
+        assert!(mappings.iter().all(|mapping| {
+            mapping.sources.iter().any(|source| {
+                matches!(
+                    source,
+                    ColumnOrigin::Concrete { table, column }
+                        if table.table == "external_table" && column == "id"
+                )
+            })
+        }));
+        // One materialization per scope, independent of the ten requested
+        // columns. The exact scope count is an implementation detail, but it
+        // must remain bounded by the five wrappers plus the base and root.
+        assert!(scope_mapping_computations() <= 8);
     }
 }
