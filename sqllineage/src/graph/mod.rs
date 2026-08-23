@@ -38,16 +38,32 @@ impl RawGraph {
         })
     }
 
-    pub fn add_ref(&mut self, name: String, qualifier: Option<String>, scope: ScopeId) -> NodeId {
+    pub fn add_ref_with_binding(
+        &mut self,
+        name: String,
+        qualifier: Option<String>,
+        scope: ScopeId,
+        binding: Option<crate::graph::scope::Binding>,
+    ) -> NodeId {
         self.add_node(RawNode::Ref {
             name,
             qualifier,
             scope,
+            binding,
         })
     }
 
-    pub fn add_unqualified(&mut self, name: String, scope: ScopeId) -> NodeId {
-        self.add_node(RawNode::Unqualified { name, scope })
+    pub fn add_unqualified_with_binding(
+        &mut self,
+        name: String,
+        scope: ScopeId,
+        binding: Option<crate::graph::scope::Binding>,
+    ) -> NodeId {
+        self.add_node(RawNode::Unqualified {
+            name,
+            scope,
+            binding,
+        })
     }
 
     pub fn add_star(&mut self, table: Option<TableRef>, scope: ScopeId) -> NodeId {

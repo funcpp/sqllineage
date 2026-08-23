@@ -9,7 +9,7 @@ use std::sync::Arc;
 use crate::graph::RawGraph;
 use crate::graph::edge::EdgeKind;
 use crate::graph::node::{NodeId, RawNode};
-use crate::graph::scope::{Binding, OutputPlan, ScopeTree};
+use crate::graph::scope::{Binding, OutputPlan, ScopeTree, VirtualColumnState, VirtualSourceId};
 use crate::types::{
     AnalyzeResult, CatalogProvider, ColumnLineage, ColumnMapping, ColumnOrigin, ColumnRef,
     ParseError, StatementType, TableRef, TransformKind, Warning, WarningKind,
@@ -183,6 +183,9 @@ fn star_arity(
             Binding::Cte(child) | Binding::DerivedTable(child) => {
                 scope_arity(child, graph, catalog, active)?
             }
+            Binding::VirtualSource(source) => {
+                Some(graph.scopes.virtual_source(source).columns.len())
+            }
         };
         match binding_width {
             Some(binding_width) => width += binding_width,
@@ -218,6 +221,80 @@ fn wildcard_mapping(output_table: Option<&TableRef>, source_table: TableRef) -> 
         }],
         transform: TransformKind::Direct,
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn expand_virtual_source(
+    source: VirtualSourceId,
+    graph: &RawGraph,
+    resolved: &mut Vec<Option<ColumnOrigin>>,
+    incoming: &[Vec<usize>],
+    catalog: Option<&dyn CatalogProvider>,
+    mapping_cache: &mut ScopeMappingCache,
+    mappings: &mut Vec<ColumnMapping>,
+) {
+    for column in &graph.scopes.virtual_source(source).columns {
+        let mut origins = Vec::new();
+        let mut visited = HashSet::new();
+        for &dependency in &column.dependencies {
+            let (dependency_origins, _, _) = collect_leaf_origins(
+                dependency,
+                graph,
+                resolved,
+                incoming,
+                &mut visited,
+                catalog,
+                mapping_cache,
+            );
+            origins.extend(dependency_origins);
+        }
+        if origins.is_empty()
+            && matches!(column.state, VirtualColumnState::Unknown)
+            && !column
+                .dependencies
+                .iter()
+                .all(|&dependency| known_empty_dependency(dependency, graph))
+        {
+            origins.push(ColumnOrigin::Ambiguous {
+                column: column.name.clone(),
+                candidates: Vec::new(),
+            });
+        }
+        mappings.push(ColumnMapping {
+            target: ColumnRef {
+                table: None,
+                column: column.name.clone(),
+            },
+            sources: origins,
+            transform: TransformKind::Direct,
+        });
+    }
+}
+
+fn known_empty_dependency(node_id: NodeId, graph: &RawGraph) -> bool {
+    let (name, binding) = match &graph.nodes[node_id] {
+        RawNode::Ref { name, binding, .. } | RawNode::Unqualified { name, binding, .. } => {
+            (name, binding.as_ref())
+        }
+        _ => return false,
+    };
+    let Some(Binding::VirtualSource(source)) = binding else {
+        return false;
+    };
+    let Some(column) = graph
+        .scopes
+        .virtual_source(*source)
+        .columns
+        .iter()
+        .find(|column| column.name == *name)
+    else {
+        return false;
+    };
+    matches!(column.state, VirtualColumnState::KnownEmpty)
+        && column
+            .dependencies
+            .iter()
+            .all(|&dependency| known_empty_dependency(dependency, graph))
 }
 
 #[derive(Default)]
@@ -539,6 +616,16 @@ fn expand_star(
             );
         } else if let Some(Binding::Table(actual_table)) = binding {
             mappings.push(wildcard_mapping(None, actual_table));
+        } else if let Some(Binding::VirtualSource(source)) = binding {
+            expand_virtual_source(
+                source,
+                graph,
+                resolved,
+                incoming,
+                catalog,
+                mapping_cache,
+                mappings,
+            );
         } else {
             mappings.push(wildcard_mapping(None, t.clone()));
         }
@@ -558,6 +645,15 @@ fn expand_star(
                         visited_scopes,
                     );
                 }
+                Binding::VirtualSource(source) => expand_virtual_source(
+                    source,
+                    graph,
+                    resolved,
+                    incoming,
+                    catalog,
+                    mapping_cache,
+                    mappings,
+                ),
             }
         }
         for &child in graph.scopes.anonymous_derived(scope) {
@@ -719,6 +815,12 @@ fn collect_leaf_origins(
     catalog: Option<&dyn CatalogProvider>,
     mapping_cache: &mut ScopeMappingCache,
 ) -> (Vec<ColumnOrigin>, bool, TransformKind) {
+    if let Some(result) =
+        resolve_virtual_reference(node_id, graph, resolved, incoming, catalog, mapping_cache)
+    {
+        return result;
+    }
+
     if let Some((sources, has_back, transform)) =
         resolve_named_scope_reference(node_id, graph, resolved, incoming, catalog, mapping_cache)
     {
@@ -784,6 +886,149 @@ fn collect_leaf_origins(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn resolve_virtual_reference(
+    node_id: NodeId,
+    graph: &RawGraph,
+    resolved: &mut Vec<Option<ColumnOrigin>>,
+    incoming: &[Vec<usize>],
+    catalog: Option<&dyn CatalogProvider>,
+    mapping_cache: &mut ScopeMappingCache,
+) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
+    let (name, binding, scope) = match &graph.nodes[node_id] {
+        RawNode::Ref {
+            name,
+            qualifier,
+            scope,
+            binding,
+        } => (
+            name,
+            binding
+                .clone()
+                .or_else(|| {
+                    qualifier
+                        .as_deref()
+                        .and_then(|qualifier| graph.scopes.lookup(*scope, qualifier).cloned())
+                })
+                .or_else(|| {
+                    graph
+                        .scopes
+                        .lookup(*scope, name)
+                        .filter(|binding| matches!(binding, Binding::VirtualSource(_)))
+                        .cloned()
+                }),
+            *scope,
+        ),
+        RawNode::Unqualified {
+            name,
+            scope,
+            binding,
+        } => (
+            name,
+            binding.clone().or_else(|| {
+                graph
+                    .scopes
+                    .lookup(*scope, name)
+                    .filter(|binding| matches!(binding, Binding::VirtualSource(_)))
+                    .cloned()
+            }),
+            *scope,
+        ),
+        _ => return None,
+    };
+    let source = match binding {
+        Some(Binding::VirtualSource(source)) => source,
+        Some(_) => return None,
+        None => match find_virtual_sources_for_column(scope, name, graph).as_slice() {
+            [source] => *source,
+            [] => return None,
+            _ => {
+                return Some((
+                    vec![ColumnOrigin::Ambiguous {
+                        column: name.clone(),
+                        candidates: Vec::new(),
+                    }],
+                    false,
+                    TransformKind::Direct,
+                ));
+            }
+        },
+    };
+    resolve_virtual_column_sources(
+        name,
+        source,
+        graph,
+        resolved,
+        incoming,
+        catalog,
+        mapping_cache,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_virtual_column_sources(
+    name: &str,
+    source: VirtualSourceId,
+    graph: &RawGraph,
+    resolved: &mut Vec<Option<ColumnOrigin>>,
+    incoming: &[Vec<usize>],
+    catalog: Option<&dyn CatalogProvider>,
+    mapping_cache: &mut ScopeMappingCache,
+) -> Option<(Vec<ColumnOrigin>, bool, TransformKind)> {
+    let column = graph
+        .scopes
+        .virtual_source(source)
+        .columns
+        .iter()
+        .find(|column| column.name == name)?;
+    let mut origins = Vec::new();
+    for &dependency in &column.dependencies {
+        let (dependency_origins, _, _) = collect_leaf_origins(
+            dependency,
+            graph,
+            resolved,
+            incoming,
+            &mut HashSet::new(),
+            catalog,
+            mapping_cache,
+        );
+        origins.extend(dependency_origins);
+    }
+    if origins.is_empty()
+        && matches!(column.state, VirtualColumnState::Unknown)
+        && !column
+            .dependencies
+            .iter()
+            .all(|&dependency| known_empty_dependency(dependency, graph))
+    {
+        origins.push(ColumnOrigin::Ambiguous {
+            column: column.name.clone(),
+            candidates: Vec::new(),
+        });
+    }
+    Some((origins, false, TransformKind::Direct))
+}
+
+fn virtual_column_origin(
+    name: &str,
+    source: VirtualSourceId,
+    graph: &RawGraph,
+) -> Option<ColumnOrigin> {
+    let column = graph
+        .scopes
+        .virtual_source(source)
+        .columns
+        .iter()
+        .find(|column| column.name == name)?;
+    match column.state {
+        VirtualColumnState::KnownEmpty => None,
+        VirtualColumnState::Unknown => Some(ColumnOrigin::Ambiguous {
+            column: column.name.clone(),
+            candidates: Vec::new(),
+        }),
+    }
+}
+
 /// Resolve a named reference through a set-operation/Delegate scope using the
 /// expanded mappings. Raw scope columns intentionally do not contain names
 /// for individual catalog-expanded star outputs, so lookup must happen here.
@@ -800,13 +1045,24 @@ fn resolve_named_scope_reference(
             name,
             qualifier,
             scope,
+            ..
         } => (name, qualifier.as_ref(), *scope),
-        RawNode::Unqualified { name, scope } => (name, None, *scope),
+        RawNode::Unqualified { name, scope, .. } => (name, None, *scope),
         _ => return None,
     };
-    let binding = qualifier
-        .and_then(|qualifier| graph.scopes.lookup(scope, qualifier).cloned())
-        .or_else(|| find_single_binding(scope, graph));
+    let binding = match &graph.nodes[node_id] {
+        RawNode::Ref {
+            binding: Some(binding),
+            ..
+        }
+        | RawNode::Unqualified {
+            binding: Some(binding),
+            ..
+        } => Some(binding.clone()),
+        _ => None,
+    }
+    .or_else(|| qualifier.and_then(|qualifier| graph.scopes.lookup(scope, qualifier).cloned()))
+    .or_else(|| find_single_binding(scope, graph));
     let Some(Binding::Cte(target_scope) | Binding::DerivedTable(target_scope)) = binding else {
         return None;
     };
@@ -876,31 +1132,29 @@ fn resolve_node(
             name,
             qualifier,
             scope,
+            binding,
         } => {
-            if let Some(qual) = qualifier {
-                let binding = graph.scopes.lookup(*scope, qual).cloned();
-                match binding {
-                    Some(Binding::Table(table_ref)) => Some(ColumnOrigin::Concrete {
-                        table: table_ref,
-                        column: name.clone(),
-                    }),
-                    Some(Binding::Cte(cte_scope) | Binding::DerivedTable(cte_scope)) => {
-                        resolve_through_scope(
-                            name,
-                            cte_scope,
-                            graph,
-                            resolved,
-                            incoming,
-                            visited,
-                            catalog,
-                            mapping_cache,
-                        )
-                    }
-                    None => Some(ColumnOrigin::Concrete {
-                        table: TableRef::new(qual.as_str()),
-                        column: name.clone(),
-                    }),
-                }
+            let binding = binding.clone().or_else(|| {
+                qualifier
+                    .as_deref()
+                    .and_then(|qual| graph.scopes.lookup(*scope, qual).cloned())
+            });
+            if let Some(binding) = binding {
+                resolve_captured_binding(
+                    name,
+                    binding,
+                    graph,
+                    resolved,
+                    incoming,
+                    visited,
+                    catalog,
+                    mapping_cache,
+                )
+            } else if let Some(qual) = qualifier {
+                Some(ColumnOrigin::Concrete {
+                    table: TableRef::new(qual.as_str()),
+                    column: name.clone(),
+                })
             } else {
                 resolve_unqualified(
                     name,
@@ -915,16 +1169,41 @@ fn resolve_node(
             }
         }
 
-        RawNode::Unqualified { name, scope } => resolve_unqualified(
+        RawNode::Unqualified {
             name,
-            *scope,
-            graph,
-            resolved,
-            incoming,
-            visited,
-            catalog,
-            mapping_cache,
-        ),
+            scope,
+            binding,
+        } => {
+            if let Some(binding) = binding.clone().or_else(|| {
+                graph
+                    .scopes
+                    .lookup(*scope, name)
+                    .filter(|binding| matches!(binding, Binding::VirtualSource(_)))
+                    .cloned()
+            }) {
+                resolve_captured_binding(
+                    name,
+                    binding,
+                    graph,
+                    resolved,
+                    incoming,
+                    visited,
+                    catalog,
+                    mapping_cache,
+                )
+            } else {
+                resolve_unqualified(
+                    name,
+                    *scope,
+                    graph,
+                    resolved,
+                    incoming,
+                    visited,
+                    catalog,
+                    mapping_cache,
+                )
+            }
+        }
 
         RawNode::Star { table, .. } => table
             .as_ref()
@@ -937,18 +1216,52 @@ fn resolve_node(
     origin
 }
 
+#[allow(clippy::too_many_arguments)]
+fn resolve_captured_binding(
+    name: &str,
+    binding: Binding,
+    graph: &RawGraph,
+    resolved: &mut Vec<Option<ColumnOrigin>>,
+    incoming: &[Vec<usize>],
+    visited: &mut HashSet<NodeId>,
+    catalog: Option<&dyn CatalogProvider>,
+    mapping_cache: &mut ScopeMappingCache,
+) -> Option<ColumnOrigin> {
+    match binding {
+        Binding::Table(table) => Some(ColumnOrigin::Concrete {
+            table,
+            column: name.to_string(),
+        }),
+        Binding::Cte(scope) | Binding::DerivedTable(scope) => resolve_through_scope(
+            name,
+            scope,
+            graph,
+            resolved,
+            incoming,
+            visited,
+            catalog,
+            mapping_cache,
+        ),
+        Binding::VirtualSource(source) => virtual_column_origin(name, source, graph),
+    }
+}
+
 fn find_cte_redirect(node_id: NodeId, graph: &RawGraph) -> Option<(NodeId, usize)> {
     match &graph.nodes[node_id] {
         RawNode::Ref {
             name,
             qualifier,
             scope,
+            binding,
         } => {
-            let binding = if let Some(qual) = qualifier {
-                graph.scopes.lookup(*scope, qual).cloned()
-            } else {
-                find_single_binding(*scope, graph)
-            };
+            let binding = binding
+                .clone()
+                .or_else(|| {
+                    qualifier
+                        .as_deref()
+                        .and_then(|qual| graph.scopes.lookup(*scope, qual).cloned())
+                })
+                .or_else(|| find_single_binding(*scope, graph));
             match binding {
                 Some(Binding::Cte(s) | Binding::DerivedTable(s)) => graph
                     .scopes
@@ -959,8 +1272,14 @@ fn find_cte_redirect(node_id: NodeId, graph: &RawGraph) -> Option<(NodeId, usize
                 _ => None,
             }
         }
-        RawNode::Unqualified { name, scope } => {
-            let binding = find_single_binding(*scope, graph);
+        RawNode::Unqualified {
+            name,
+            scope,
+            binding,
+        } => {
+            let binding = binding
+                .clone()
+                .or_else(|| find_single_binding(*scope, graph));
             match binding {
                 Some(Binding::Cte(s) | Binding::DerivedTable(s)) => graph
                     .scopes
@@ -1035,6 +1354,7 @@ fn resolve_from_bindings(
                 catalog,
                 mapping_cache,
             ),
+            Binding::VirtualSource(_) => None,
         }
     } else if bindings.is_empty() {
         Some(ColumnOrigin::Ambiguous {
@@ -1065,6 +1385,7 @@ fn resolve_from_bindings(
                     }
                 }
                 Binding::Table(t) => table_candidates.push(t.clone()),
+                Binding::VirtualSource(_) => {}
             }
         }
         if table_candidates.len() == 1 {
@@ -1079,6 +1400,31 @@ fn resolve_from_bindings(
             })
         }
     }
+}
+
+fn virtual_has_column(name: &str, source: VirtualSourceId, graph: &RawGraph) -> bool {
+    graph
+        .scopes
+        .virtual_source(source)
+        .columns
+        .iter()
+        .any(|column| column.name == name)
+}
+
+fn find_virtual_sources_for_column(
+    scope: usize,
+    name: &str,
+    graph: &RawGraph,
+) -> Vec<VirtualSourceId> {
+    effective_bindings(scope, graph)
+        .into_iter()
+        .filter_map(|(_, binding)| match binding {
+            Binding::VirtualSource(source) if virtual_has_column(name, source, graph) => {
+                Some(source)
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]

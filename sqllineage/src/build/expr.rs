@@ -4,23 +4,40 @@ use crate::build::LineageBuilder;
 use crate::build::select::split_compound;
 use crate::graph::edge::EdgeKind;
 use crate::graph::node::NodeId;
-use crate::graph::scope::ScopeKind;
+use crate::graph::scope::{Binding, ScopeKind};
 
 impl LineageBuilder {
     pub(crate) fn collect_ancestors(&mut self, expr: &Expr) -> Vec<NodeId> {
         match expr {
             Expr::Identifier(ident) => {
-                let node = self
+                let binding = self
                     .graph
-                    .add_unqualified(ident.value.clone(), self.current_scope);
+                    .scopes
+                    .lookup(self.current_scope, &ident.value)
+                    .cloned();
+                let binding =
+                    binding.filter(|binding| matches!(binding, Binding::VirtualSource(_)));
+                let node = self.graph.add_unqualified_with_binding(
+                    ident.value.clone(),
+                    self.current_scope,
+                    binding,
+                );
                 vec![node]
             }
 
             Expr::CompoundIdentifier(parts) => {
                 let (qualifier, column) = split_compound(parts);
-                let node = self
+                let binding = self
                     .graph
-                    .add_ref(column, Some(qualifier), self.current_scope);
+                    .scopes
+                    .lookup(self.current_scope, &qualifier)
+                    .cloned();
+                let node = self.graph.add_ref_with_binding(
+                    column,
+                    Some(qualifier),
+                    self.current_scope,
+                    binding,
+                );
                 vec![node]
             }
 
@@ -316,25 +333,39 @@ impl LineageBuilder {
         access_chain: &[AccessExpr],
     ) -> Vec<NodeId> {
         let mut ancestors = match (root, access_chain.first()) {
-            (Expr::Identifier(binding), Some(AccessExpr::Dot(Expr::Identifier(field))))
+            (Expr::Identifier(binding_name), Some(AccessExpr::Dot(Expr::Identifier(field))))
                 if self
                     .graph
                     .scopes
-                    .lookup(self.current_scope, &binding.value)
+                    .lookup(self.current_scope, &binding_name.value)
                     .is_some() =>
             {
-                let node = self.graph.add_ref(
+                let binding = self
+                    .graph
+                    .scopes
+                    .lookup(self.current_scope, &binding_name.value)
+                    .cloned();
+                let node = self.graph.add_ref_with_binding(
                     field.value.clone(),
-                    Some(binding.value.clone()),
+                    Some(binding_name.value.clone()),
                     self.current_scope,
+                    binding,
                 );
                 vec![node]
             }
             (Expr::Identifier(column), Some(AccessExpr::Dot(Expr::Identifier(_)))) => {
-                vec![
-                    self.graph
-                        .add_unqualified(column.value.clone(), self.current_scope),
-                ]
+                let binding = self
+                    .graph
+                    .scopes
+                    .lookup(self.current_scope, &column.value)
+                    .cloned();
+                let binding =
+                    binding.filter(|binding| matches!(binding, Binding::VirtualSource(_)));
+                vec![self.graph.add_unqualified_with_binding(
+                    column.value.clone(),
+                    self.current_scope,
+                    binding,
+                )]
             }
             _ => self.collect_ancestors(root),
         };

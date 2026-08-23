@@ -5,6 +5,30 @@ use crate::types::TableRef;
 
 pub(crate) type ScopeId = usize;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct VirtualSourceId {
+    scope: ScopeId,
+    index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VirtualColumnState {
+    KnownEmpty,
+    Unknown,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct VirtualColumn {
+    pub name: String,
+    pub dependencies: Vec<NodeId>,
+    pub state: VirtualColumnState,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct VirtualSource {
+    pub columns: Vec<VirtualColumn>,
+}
+
 pub(crate) struct ScopeTree {
     scopes: Vec<Scope>,
 }
@@ -15,6 +39,7 @@ struct Scope {
     anonymous_derived: Vec<ScopeId>,
     output_columns: Vec<ScopeColumn>,
     output_plan: OutputPlan,
+    virtual_sources: Vec<VirtualSource>,
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +69,7 @@ pub(crate) enum Binding {
     Table(TableRef),
     Cte(ScopeId),
     DerivedTable(ScopeId),
+    VirtualSource(VirtualSourceId),
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +87,7 @@ impl ScopeTree {
                 anonymous_derived: Vec::new(),
                 output_columns: Vec::new(),
                 output_plan: OutputPlan::Projection,
+                virtual_sources: Vec::new(),
             }],
         }
     }
@@ -77,6 +104,7 @@ impl ScopeTree {
             anonymous_derived: Vec::new(),
             output_columns: Vec::new(),
             output_plan: OutputPlan::Projection,
+            virtual_sources: Vec::new(),
         });
         id
     }
@@ -87,6 +115,22 @@ impl ScopeTree {
 
     pub fn add_binding(&mut self, scope: ScopeId, name: String, binding: Binding) {
         self.scopes[scope].bindings.insert(name, binding);
+    }
+
+    pub fn add_virtual_source(
+        &mut self,
+        scope: ScopeId,
+        columns: Vec<VirtualColumn>,
+    ) -> VirtualSourceId {
+        let index = self.scopes[scope].virtual_sources.len();
+        self.scopes[scope]
+            .virtual_sources
+            .push(VirtualSource { columns });
+        VirtualSourceId { scope, index }
+    }
+
+    pub fn virtual_source(&self, id: VirtualSourceId) -> &VirtualSource {
+        &self.scopes[id.scope].virtual_sources[id.index]
     }
 
     pub fn add_output_column(&mut self, scope: ScopeId, col: ScopeColumn) {

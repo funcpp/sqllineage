@@ -164,3 +164,113 @@ fn select_cast_passthrough() {
     assert_eq!(concrete_sources(m), vec![("t".into(), "a".into())]);
     assert_eq!(m.transform, TransformKind::Direct);
 }
+
+#[test]
+fn unnest_source_free_alias_has_no_physical_sources() {
+    let result = analyze_one(
+        "SELECT item FROM UNNEST(GENERATE_DATE_ARRAY(DATE('2020-01-01'), DATE('2020-01-03'))) AS item",
+    );
+    let mapping = find_mapping(&result.columns.mappings, "item");
+    assert!(mapping.sources.is_empty());
+    assert_eq!(result.tables.inputs, Vec::<sqllineage::TableRef>::new());
+}
+
+#[test]
+fn unnest_alias_depends_on_array_column() {
+    let result = analyze_one("SELECT item FROM base, UNNEST(base.items_array) AS item");
+    let mapping = find_mapping(&result.columns.mappings, "item");
+    assert_eq!(
+        concrete_sources(mapping),
+        vec![("base".into(), "items_array".into())]
+    );
+}
+
+#[test]
+fn unnest_unresolved_array_is_ambiguous_not_alias_column() {
+    let result = analyze_one("SELECT item FROM UNNEST(missing_array) AS item");
+    let mapping = find_mapping(&result.columns.mappings, "item");
+    assert!(matches!(
+        mapping.sources.as_slice(),
+        [ColumnOrigin::Ambiguous { column, candidates }] if column == "item" && candidates.is_empty()
+    ));
+}
+
+#[test]
+fn unnest_unqualified_array_column_keeps_prior_table_binding() {
+    let result = analyze_one("SELECT item FROM base, UNNEST(items_array) AS item");
+    assert_eq!(
+        concrete_sources(find_mapping(&result.columns.mappings, "item")),
+        vec![("base".into(), "items_array".into())]
+    );
+}
+
+#[test]
+fn unnest_known_empty_virtual_dependency_stays_source_free() {
+    let result = analyze_one("SELECT item FROM UNNEST([1, 2]) AS source, UNNEST(source) AS item");
+    assert!(
+        find_mapping(&result.columns.mappings, "item")
+            .sources
+            .is_empty()
+    );
+}
+
+#[test]
+fn unqualified_identifier_does_not_capture_relation_alias() {
+    let result = analyze_one("SELECT a FROM table1 AS a, table2 AS b");
+    let mapping = find_mapping(&result.columns.mappings, "a");
+    assert!(matches!(
+        mapping.sources.as_slice(),
+        [ColumnOrigin::Ambiguous { column, candidates }]
+            if column == "a" && candidates.len() == 2
+    ));
+}
+
+#[test]
+fn duplicate_virtual_slots_are_ambiguous_but_qualified_slots_resolve() {
+    let result =
+        analyze_one("SELECT x FROM base, UNNEST(base.first) AS u(x), UNNEST(base.second) AS v(x)");
+    assert!(matches!(
+        find_mapping(&result.columns.mappings, "x").sources.as_slice(),
+        [ColumnOrigin::Ambiguous { column, candidates }] if column == "x" && candidates.is_empty()
+    ));
+
+    let result = analyze_one(
+        "SELECT u.x, v.x FROM base, UNNEST(base.first) AS u(x), UNNEST(base.second) AS v(x)",
+    );
+    assert_eq!(
+        concrete_sources(&result.columns.mappings[0]),
+        vec![("base".into(), "first".into())]
+    );
+    assert_eq!(
+        concrete_sources(&result.columns.mappings[1]),
+        vec![("base".into(), "second".into())]
+    );
+}
+
+#[test]
+fn unnest_alias_columns_keep_array_expression_ordinals() {
+    let result = analyze_one("SELECT x, y FROM base, UNNEST(base.first, base.second) AS u(x, y)");
+    assert_eq!(
+        concrete_sources(find_mapping(&result.columns.mappings, "x")),
+        vec![("base".into(), "first".into())]
+    );
+    assert_eq!(
+        concrete_sources(find_mapping(&result.columns.mappings, "y")),
+        vec![("base".into(), "second".into())]
+    );
+}
+
+#[test]
+fn unnest_offset_is_a_source_free_generated_slot() {
+    let result = analyze_one("SELECT item, off FROM UNNEST([1, 2]) AS item WITH OFFSET AS off");
+    assert!(
+        find_mapping(&result.columns.mappings, "item")
+            .sources
+            .is_empty()
+    );
+    assert!(
+        find_mapping(&result.columns.mappings, "off")
+            .sources
+            .is_empty()
+    );
+}
