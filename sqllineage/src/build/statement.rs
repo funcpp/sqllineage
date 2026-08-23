@@ -372,7 +372,7 @@ impl LineageBuilder {
         }
     }
 
-    fn normalize_ident(&self, ident: &Ident) -> String {
+    pub(crate) fn normalize_ident(&self, ident: &Ident) -> String {
         if self.normalize_case && ident.quote_style.is_none() {
             ident.value.to_lowercase()
         } else {

@@ -3,9 +3,8 @@ pub(crate) mod node;
 pub(crate) mod scope;
 
 use crate::types::TableLineage;
-use crate::types::TableRef;
 use edge::{EdgeKind, RawEdge};
-use node::{NodeId, RawNode};
+use node::{NodeId, RawNode, StarBase, StarOptions};
 use scope::{ScopeId, ScopeTree};
 
 pub(crate) struct RawGraph {
@@ -79,8 +78,12 @@ impl RawGraph {
         })
     }
 
-    pub fn add_star(&mut self, table: Option<TableRef>, scope: ScopeId) -> NodeId {
-        self.add_node(RawNode::Star { table, scope })
+    pub fn add_star(&mut self, base: StarBase, options: StarOptions, scope: ScopeId) -> NodeId {
+        self.add_node(RawNode::Star {
+            base,
+            options,
+            scope,
+        })
     }
 
     pub fn add_edge(&mut self, from: NodeId, to: NodeId, kind: EdgeKind) {

@@ -1,9 +1,11 @@
 use sqlparser::ast::{
-    Expr, Select, SelectItem, SelectItemQualifiedWildcardKind, TableFactor, TableWithJoins,
+    Expr, ObjectName, Select, SelectItem, SelectItemQualifiedWildcardKind, TableFactor,
+    TableWithJoins, WildcardAdditionalOptions,
 };
 
 use crate::build::LineageBuilder;
 use crate::build::expr::determine_edge_kind;
+use crate::graph::node::{StarBase, StarColumnName, StarOptions, StarReplacement};
 use crate::graph::scope::{Binding, ScopeColumn, ScopeKind, VirtualColumn, VirtualColumnState};
 
 impl LineageBuilder {
@@ -70,8 +72,13 @@ impl LineageBuilder {
                         );
                     }
                 }
-                SelectItem::Wildcard(_) => {
-                    let star = self.graph.add_star(None, self.current_scope);
+                SelectItem::Wildcard(options) => {
+                    let star_options = self.star_options(options);
+                    let star = self.graph.add_star(
+                        StarBase::Unqualified,
+                        star_options,
+                        self.current_scope,
+                    );
                     self.graph.scopes.add_output_column(
                         self.current_scope,
                         ScopeColumn {
@@ -80,21 +87,105 @@ impl LineageBuilder {
                         },
                     );
                 }
-                SelectItem::QualifiedWildcard(kind, _) => {
-                    if let SelectItemQualifiedWildcardKind::ObjectName(obj_name) = kind {
-                        let table = self.table_ref_from_object_name(obj_name);
-                        let star = self.graph.add_star(Some(table), self.current_scope);
-                        self.graph.scopes.add_output_column(
-                            self.current_scope,
-                            ScopeColumn {
-                                name: "*".to_string(),
-                                node_id: star,
-                            },
-                        );
-                    }
+                SelectItem::QualifiedWildcard(kind, options) => {
+                    let base = match kind {
+                        SelectItemQualifiedWildcardKind::ObjectName(obj_name) => {
+                            StarBase::Qualified(self.object_name_parts(obj_name))
+                        }
+                        SelectItemQualifiedWildcardKind::Expr(expr) => {
+                            StarBase::Expr(self.collect_ancestors(expr))
+                        }
+                    };
+                    let star_options = self.star_options(options);
+                    let star = self.graph.add_star(base, star_options, self.current_scope);
+                    self.graph.scopes.add_output_column(
+                        self.current_scope,
+                        ScopeColumn {
+                            name: "*".to_string(),
+                            node_id: star,
+                        },
+                    );
                 }
             }
         }
+    }
+
+    fn object_name_parts(&self, name: &ObjectName) -> Vec<String> {
+        name.0
+            .iter()
+            .map(|part| {
+                part.as_ident()
+                    .map_or_else(|| part.to_string(), |ident| self.normalize_ident(ident))
+            })
+            .collect()
+    }
+
+    fn star_options(&mut self, options: &WildcardAdditionalOptions) -> StarOptions {
+        let mut result = StarOptions {
+            ilike: options
+                .opt_ilike
+                .as_ref()
+                .map(|ilike| ilike.pattern.clone()),
+            ..StarOptions::default()
+        };
+
+        if let Some(exclude) = &options.opt_exclude {
+            result.exclude.extend(match exclude {
+                sqlparser::ast::ExcludeSelectItem::Single(name) => {
+                    vec![StarColumnName {
+                        parts: self.object_name_parts(name),
+                    }]
+                }
+                sqlparser::ast::ExcludeSelectItem::Multiple(names) => names
+                    .iter()
+                    .map(|name| StarColumnName {
+                        parts: self.object_name_parts(name),
+                    })
+                    .collect(),
+            });
+        }
+        if let Some(except) = &options.opt_except {
+            result.exclude.push(StarColumnName {
+                parts: vec![self.normalize_ident(&except.first_element)],
+            });
+            result.exclude.extend(
+                except
+                    .additional_elements
+                    .iter()
+                    .map(|ident| StarColumnName {
+                        parts: vec![self.normalize_ident(ident)],
+                    }),
+            );
+        }
+        if let Some(rename) = &options.opt_rename {
+            let entries = match rename {
+                sqlparser::ast::RenameSelectItem::Single(entry) => vec![entry],
+                sqlparser::ast::RenameSelectItem::Multiple(entries) => entries.iter().collect(),
+            };
+            result.rename.extend(entries.into_iter().map(|entry| {
+                (
+                    self.normalize_ident(&entry.ident),
+                    self.normalize_ident(&entry.alias),
+                )
+            }));
+        }
+        if let Some(replace) = &options.opt_replace {
+            for element in &replace.items {
+                let node_id = self.graph.add_output(
+                    "?wildcard-replace".to_string(),
+                    determine_edge_kind(&element.expr),
+                );
+                for ancestor in self.collect_ancestors(&element.expr) {
+                    self.graph
+                        .add_edge(ancestor, node_id, determine_edge_kind(&element.expr));
+                }
+                result.replace.push(StarReplacement {
+                    column: self.normalize_ident(&element.column_name),
+                    node_id,
+                });
+            }
+        }
+        result
     }
 
     /// Process FROM clause items (including JOINs).

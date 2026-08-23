@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::graph::RawGraph;
 use crate::graph::edge::EdgeKind;
-use crate::graph::node::{NodeId, RawNode};
+use crate::graph::node::{NodeId, RawNode, StarBase, StarColumnName, StarOptions};
 use crate::graph::scope::{Binding, OutputPlan, ScopeTree, VirtualColumnState, VirtualSourceId};
 use crate::types::{
     AnalyzeResult, CatalogProvider, ColumnLineage, ColumnMapping, ColumnOrigin, ColumnRef,
@@ -103,13 +103,15 @@ pub(crate) fn resolve(
 /// dependency and must be visible to consumers of the public result.
 fn graph_has_unresolved_stars(graph: &RawGraph, catalog: Option<&dyn CatalogProvider>) -> bool {
     graph.nodes.iter().any(|node| {
-        let RawNode::Star { table, scope } = node else {
+        let RawNode::Star {
+            base,
+            options,
+            scope,
+        } = node
+        else {
             return false;
         };
-        matches!(
-            star_arity(table.as_ref(), *scope, graph, catalog, &mut HashSet::new()),
-            Ok(None)
-        )
+        star_arity(base, options, *scope, graph, catalog, &mut HashSet::new()).is_none()
     })
 }
 
@@ -141,11 +143,12 @@ fn scope_arity(
             let mut exact = true;
             for col in graph.scopes.output_columns(scope) {
                 if let RawNode::Star {
-                    table,
+                    base,
+                    options,
                     scope: star_scope,
                 } = &graph.nodes[col.node_id]
                 {
-                    match star_arity(table.as_ref(), *star_scope, graph, catalog, active)? {
+                    match star_arity(base, options, *star_scope, graph, catalog, active) {
                         Some(star_width) => width += star_width,
                         None => exact = false,
                     }
@@ -177,53 +180,256 @@ fn scope_arity(
 }
 
 fn star_arity(
-    table: Option<&TableRef>,
+    base: &StarBase,
+    options: &StarOptions,
     scope: usize,
     graph: &RawGraph,
     catalog: Option<&dyn CatalogProvider>,
     active: &mut HashSet<usize>,
-) -> Result<Option<usize>, ParseError> {
-    if let Some(table) = table {
-        let binding = graph.scopes.lookup(scope, &table.table).cloned();
-        return match binding {
-            Some(Binding::Cte(child) | Binding::DerivedTable(child)) => {
-                scope_arity(child, graph, catalog, active)
+) -> Option<usize> {
+    let target = resolve_star_target(base, scope, graph);
+    let names = match target {
+        StarTarget::All => {
+            let mut names = Vec::new();
+            for (binding_name, binding) in effective_bindings(scope, graph) {
+                let binding_names = binding_column_names(&binding, graph, catalog, active)?;
+                let qualifier = [binding_name];
+                names.extend(apply_name_options(
+                    binding_names,
+                    options,
+                    Some(base),
+                    Some(&qualifier),
+                ));
             }
-            Some(Binding::Table(actual_table)) => Ok(catalog
-                .and_then(|catalog| catalog.list_columns(&actual_table))
-                .map(|columns| columns.len())),
-            _ => Ok(catalog
-                .and_then(|catalog| catalog.list_columns(table))
-                .map(|columns| columns.len())),
-        };
-    }
+            for &child in graph.scopes.anonymous_derived(scope) {
+                let child_names = scope_output_names(child, graph, catalog, active)?;
+                names.extend(apply_name_options(child_names, options, Some(base), None));
+            }
+            Some(names)
+        }
+        StarTarget::Binding(binding) => binding_column_names(&binding, graph, catalog, active)
+            .map(|names| apply_name_options(names, options, Some(base), None)),
+        StarTarget::Unknown(table) => catalog
+            .and_then(|catalog| catalog.list_columns(&table))
+            .map(|names| apply_name_options(names, options, Some(base), None)),
+        StarTarget::FieldPath { .. } | StarTarget::Expr => None,
+    };
+    names.map(|names| names.len())
+}
 
-    let bindings = effective_bindings(scope, graph);
-    let mut width = 0;
-    for (_, binding) in bindings {
-        let binding_width = match binding {
-            Binding::Table(table) => catalog
-                .and_then(|catalog| catalog.list_columns(&table))
-                .map(|columns| columns.len()),
-            Binding::Cte(child) | Binding::DerivedTable(child) => {
-                scope_arity(child, graph, catalog, active)?
+enum StarTarget {
+    All,
+    Binding(Binding),
+    Unknown(TableRef),
+    FieldPath { binding: Binding, path: Vec<String> },
+    Expr,
+}
+
+fn binding_column_names(
+    binding: &Binding,
+    graph: &RawGraph,
+    catalog: Option<&dyn CatalogProvider>,
+    active: &mut HashSet<usize>,
+) -> Option<Vec<String>> {
+    match binding {
+        Binding::Table(table) => catalog.and_then(|catalog| catalog.list_columns(table)),
+        Binding::Cte(child) | Binding::DerivedTable(child) => {
+            scope_output_names(*child, graph, catalog, active)
+        }
+        Binding::VirtualSource(source) => Some(
+            graph
+                .scopes
+                .virtual_source(*source)
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect(),
+        ),
+    }
+}
+
+fn scope_output_names(
+    scope: usize,
+    graph: &RawGraph,
+    catalog: Option<&dyn CatalogProvider>,
+    active: &mut HashSet<usize>,
+) -> Option<Vec<String>> {
+    if !active.insert(scope) {
+        return None;
+    }
+    let result = match graph.scopes.output_plan(scope) {
+        OutputPlan::Projection => {
+            let mut names = Vec::new();
+            for column in graph.scopes.output_columns(scope) {
+                match &graph.nodes[column.node_id] {
+                    RawNode::Star {
+                        base,
+                        options,
+                        scope: star_scope,
+                    } => {
+                        let target = resolve_star_target(base, *star_scope, graph);
+                        let child_names = match target {
+                            StarTarget::All => {
+                                let mut values = Vec::new();
+                                for (binding_name, binding) in
+                                    effective_bindings(*star_scope, graph)
+                                {
+                                    let binding_names =
+                                        binding_column_names(&binding, graph, catalog, active)?;
+                                    let qualifier = [binding_name];
+                                    values.extend(apply_name_options(
+                                        binding_names,
+                                        options,
+                                        Some(base),
+                                        Some(&qualifier),
+                                    ));
+                                }
+                                Some(values)
+                            }
+                            StarTarget::Binding(binding) => binding_column_names(
+                                &binding, graph, catalog, active,
+                            )
+                            .map(|names| apply_name_options(names, options, Some(base), None)),
+                            StarTarget::Unknown(table) => catalog
+                                .and_then(|catalog| catalog.list_columns(&table))
+                                .map(|names| apply_name_options(names, options, Some(base), None)),
+                            StarTarget::FieldPath { .. } | StarTarget::Expr => None,
+                        }?;
+                        names.extend(child_names);
+                    }
+                    _ => names.push(column.name.clone()),
+                }
             }
-            Binding::VirtualSource(source) => {
-                Some(graph.scopes.virtual_source(source).columns.len())
-            }
-        };
-        match binding_width {
-            Some(binding_width) => width += binding_width,
-            None => return Ok(None),
+            Some(names)
+        }
+        OutputPlan::Delegate(child) => scope_output_names(*child, graph, catalog, active),
+        OutputPlan::SetOperation { left, .. } => scope_output_names(*left, graph, catalog, active),
+    };
+    active.remove(&scope);
+    result
+}
+
+fn apply_name_options(
+    mut names: Vec<String>,
+    options: &StarOptions,
+    base: Option<&StarBase>,
+    relation_qualifier: Option<&[String]>,
+) -> Vec<String> {
+    names.retain(|name| {
+        !options.exclude.iter().any(|excluded| {
+            excluded_matches_name_with_context(excluded, name, base, relation_qualifier)
+        }) && options
+            .ilike
+            .as_deref()
+            .is_none_or(|pattern| ilike_matches(pattern, name))
+    });
+    for (old, new) in &options.rename {
+        if let Some(name) = names.iter_mut().find(|name| same_column_name(name, old)) {
+            name.clone_from(new);
         }
     }
-    for &child in graph.scopes.anonymous_derived(scope) {
-        match scope_arity(child, graph, catalog, active)? {
-            Some(child_width) => width += child_width,
-            None => return Ok(None),
+    names
+}
+
+fn excluded_matches_name_with_context(
+    excluded: &StarColumnName,
+    name: &str,
+    base: Option<&StarBase>,
+    relation_qualifier: Option<&[String]>,
+) -> bool {
+    let Some((excluded_column, qualifier)) = excluded.parts.split_last() else {
+        return false;
+    };
+    same_column_name(name, excluded_column)
+        && (qualifier.is_empty()
+            || base.is_some_and(
+                |base| matches!(base, StarBase::Qualified(parts) if parts == qualifier),
+            )
+            || relation_qualifier.is_some_and(|parts| parts == qualifier))
+}
+
+fn same_column_name(left: &str, right: &str) -> bool {
+    left == right
+}
+
+fn ilike_matches(pattern: &str, value: &str) -> bool {
+    fn matches(pattern: &[char], value: &[char]) -> bool {
+        match pattern.split_first() {
+            None => value.is_empty(),
+            Some(('%', rest)) => {
+                matches(rest, value) || value.first().is_some_and(|_| matches(pattern, &value[1..]))
+            }
+            Some(('_', rest)) => value
+                .split_first()
+                .is_some_and(|(_, tail)| matches(rest, tail)),
+            Some((part, rest)) => value.split_first().is_some_and(|(value, tail)| {
+                part.eq_ignore_ascii_case(value) && matches(rest, tail)
+            }),
         }
     }
-    Ok(Some(width))
+    matches(
+        &pattern.chars().collect::<Vec<_>>(),
+        &value.chars().collect::<Vec<_>>(),
+    )
+}
+
+fn resolve_star_target(base: &StarBase, scope: usize, graph: &RawGraph) -> StarTarget {
+    match base {
+        StarBase::Unqualified => StarTarget::All,
+        StarBase::Expr(_) => StarTarget::Expr,
+        StarBase::Qualified(parts) => {
+            let mut best: Option<(usize, Binding)> = None;
+            for (name, binding) in graph.scopes.visible_bindings(scope) {
+                let candidates = match &binding {
+                    Binding::Table(table) => {
+                        let mut values = Vec::new();
+                        if let Some(catalog) = &table.catalog {
+                            values.push(catalog.clone());
+                        }
+                        if let Some(schema) = &table.schema {
+                            values.push(schema.clone());
+                        }
+                        values.push(table.table.clone());
+                        vec![values, vec![name.clone()]]
+                    }
+                    _ => vec![vec![name.clone()]],
+                };
+                for candidate in candidates {
+                    if parts.len() >= candidate.len() && parts[..candidate.len()] == candidate[..] {
+                        let matched = candidate.len();
+                        if best.as_ref().is_none_or(|(length, _)| matched > *length) {
+                            best = Some((matched, binding.clone()));
+                        }
+                    }
+                }
+            }
+            if let Some((matched, binding)) = best {
+                if matched == parts.len() {
+                    StarTarget::Binding(binding)
+                } else {
+                    StarTarget::FieldPath {
+                        binding,
+                        path: parts[matched..].to_vec(),
+                    }
+                }
+            } else {
+                StarTarget::Unknown(table_ref_from_parts(parts))
+            }
+        }
+    }
+}
+
+fn table_ref_from_parts(parts: &[String]) -> TableRef {
+    match parts {
+        [table] => TableRef::new(table.clone()),
+        [schema, table] => TableRef::with_schema(schema.clone(), table.clone()),
+        [catalog, schema, table] => TableRef {
+            catalog: Some(catalog.clone()),
+            schema: Some(schema.clone()),
+            table: table.clone(),
+        },
+        _ => TableRef::new(parts.join(".")),
+    }
 }
 
 fn effective_bindings(scope: usize, graph: &RawGraph) -> Vec<(String, Binding)> {
@@ -411,8 +617,13 @@ fn resolve_scope_mappings(
                             transform,
                         });
                     }
-                    RawNode::Star { table, scope } => expand_star(
-                        table.as_ref(),
+                    RawNode::Star {
+                        base,
+                        options,
+                        scope,
+                    } => expand_star(
+                        base,
+                        options,
                         *scope,
                         graph,
                         resolved,
@@ -525,9 +736,11 @@ fn mappings_have_unknown_shape(mappings: &[ColumnMapping]) -> bool {
         mapping.target.column == "*"
             && mapping.sources.iter().any(|source| match source {
                 ColumnOrigin::Wildcard { .. } => true,
-                ColumnOrigin::Recursive { base_sources } => base_sources
-                    .iter()
-                    .any(|source| matches!(source, ColumnOrigin::Wildcard { .. })),
+                ColumnOrigin::Ambiguous { column, .. } if column == "*" => true,
+                ColumnOrigin::Recursive { base_sources } => base_sources.iter().any(|source| {
+                    matches!(source, ColumnOrigin::Wildcard { .. })
+                        || matches!(source, ColumnOrigin::Ambiguous { column, .. } if column == "*")
+                }),
                 _ => false,
             })
     })
@@ -607,10 +820,16 @@ fn wildcard_sources(mappings: &[ColumnMapping]) -> Vec<ColumnOrigin> {
         for source in &mapping.sources {
             match source {
                 ColumnOrigin::Wildcard { .. } => sources.push(source.clone()),
+                ColumnOrigin::Ambiguous { column, .. } if column == "*" => {
+                    sources.push(source.clone());
+                }
                 ColumnOrigin::Recursive { base_sources } => sources.extend(
                     base_sources
                         .iter()
-                        .filter(|source| matches!(source, ColumnOrigin::Wildcard { .. }))
+                        .filter(|source| {
+                            matches!(source, ColumnOrigin::Wildcard { .. })
+                                || matches!(source, ColumnOrigin::Ambiguous { column, .. } if column == "*")
+                        })
                         .cloned(),
                 ),
                 _ => {}
@@ -656,7 +875,8 @@ fn merge_transform(left: &TransformKind, right: &TransformKind) -> TransformKind
 /// Expand a Star node (qualified or unqualified) into `ColumnMapping`s.
 #[allow(clippy::too_many_arguments)]
 fn expand_star(
-    table: Option<&TableRef>,
+    base: &StarBase,
+    options: &StarOptions,
     scope: usize,
     graph: &RawGraph,
     resolved: &mut Vec<Option<ColumnOrigin>>,
@@ -666,73 +886,411 @@ fn expand_star(
     mappings: &mut Vec<ColumnMapping>,
     visited_scopes: &mut HashSet<usize>,
 ) {
-    if let Some(t) = table {
-        let binding = graph.scopes.lookup(scope, &t.table).cloned();
-        if let Some(Binding::Cte(s) | Binding::DerivedTable(s)) = binding {
-            expand_scope_columns(
-                s,
-                graph,
-                resolved,
-                incoming,
-                catalog,
-                mapping_cache,
-                mappings,
-                visited_scopes,
-            );
-        } else if let Some(Binding::Table(actual_table)) = binding {
-            mappings.push(wildcard_mapping(None, actual_table));
-        } else if let Some(Binding::VirtualSource(source)) = binding {
-            expand_virtual_source(
-                source,
-                graph,
-                resolved,
-                incoming,
-                catalog,
-                mapping_cache,
-                mappings,
-            );
-        } else {
-            mappings.push(wildcard_mapping(None, t.clone()));
-        }
-    } else {
-        for (_, binding) in effective_bindings(scope, graph) {
-            match binding {
-                Binding::Table(tref) => mappings.push(wildcard_mapping(None, tref)),
-                Binding::Cte(s) | Binding::DerivedTable(s) => {
-                    expand_scope_columns(
-                        s,
-                        graph,
-                        resolved,
-                        incoming,
-                        catalog,
-                        mapping_cache,
-                        mappings,
-                        visited_scopes,
-                    );
-                }
-                Binding::VirtualSource(source) => expand_virtual_source(
-                    source,
+    let start = mappings.len();
+    match resolve_star_target(base, scope, graph) {
+        StarTarget::All => {
+            for (_, binding) in effective_bindings(scope, graph) {
+                expand_star_binding(
+                    &binding,
                     graph,
                     resolved,
                     incoming,
                     catalog,
                     mapping_cache,
                     mappings,
-                ),
+                    visited_scopes,
+                );
+            }
+            for &child in graph.scopes.anonymous_derived(scope) {
+                expand_scope_columns(
+                    child,
+                    graph,
+                    resolved,
+                    incoming,
+                    catalog,
+                    mapping_cache,
+                    mappings,
+                    visited_scopes,
+                );
             }
         }
-        for &child in graph.scopes.anonymous_derived(scope) {
-            expand_scope_columns(
-                child,
-                graph,
-                resolved,
-                incoming,
-                catalog,
-                mapping_cache,
-                mappings,
-                visited_scopes,
-            );
+        StarTarget::Binding(binding) => expand_star_binding(
+            &binding,
+            graph,
+            resolved,
+            incoming,
+            catalog,
+            mapping_cache,
+            mappings,
+            visited_scopes,
+        ),
+        StarTarget::Unknown(table) => expand_unknown_relation(table, catalog, mappings),
+        StarTarget::FieldPath { binding, path } => {
+            let mut sources = Vec::new();
+            if let Some(field) = path.first()
+                && let Some(origin) = resolve_captured_binding(
+                    field,
+                    binding,
+                    graph,
+                    resolved,
+                    incoming,
+                    &mut HashSet::new(),
+                    catalog,
+                    mapping_cache,
+                )
+            {
+                sources.push(origin);
+            }
+            sources.push(ColumnOrigin::Ambiguous {
+                column: "*".to_string(),
+                candidates: Vec::new(),
+            });
+            mappings.push(ColumnMapping {
+                target: ColumnRef {
+                    table: None,
+                    column: "*".to_string(),
+                },
+                sources,
+                transform: TransformKind::Direct,
+            });
         }
+        StarTarget::Expr => {
+            let mut sources = Vec::new();
+            if let StarBase::Expr(dependencies) = base {
+                for &dependency in dependencies {
+                    let (origins, _, _) = collect_leaf_origins(
+                        dependency,
+                        graph,
+                        resolved,
+                        incoming,
+                        &mut HashSet::new(),
+                        catalog,
+                        mapping_cache,
+                    );
+                    sources.extend(origins);
+                }
+            }
+            if !sources.iter().any(
+                |source| matches!(source, ColumnOrigin::Ambiguous { column, .. } if column == "*"),
+            ) {
+                sources.push(ColumnOrigin::Ambiguous {
+                    column: "*".to_string(),
+                    candidates: Vec::new(),
+                });
+            }
+            mappings.push(ColumnMapping {
+                target: ColumnRef {
+                    table: None,
+                    column: "*".to_string(),
+                },
+                sources,
+                transform: TransformKind::Direct,
+            });
+        }
+    }
+    apply_star_options(
+        mappings,
+        start,
+        base,
+        scope,
+        options,
+        graph,
+        resolved,
+        incoming,
+        catalog,
+        mapping_cache,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn expand_star_binding(
+    binding: &Binding,
+    graph: &RawGraph,
+    resolved: &mut Vec<Option<ColumnOrigin>>,
+    incoming: &[Vec<usize>],
+    catalog: Option<&dyn CatalogProvider>,
+    mapping_cache: &mut ScopeMappingCache,
+    mappings: &mut Vec<ColumnMapping>,
+    visited_scopes: &mut HashSet<usize>,
+) {
+    match binding {
+        Binding::Table(table) => {
+            if let Some(columns) = catalog.and_then(|catalog| catalog.list_columns(table)) {
+                mappings.extend(columns.into_iter().map(|column| ColumnMapping {
+                    target: ColumnRef {
+                        table: None,
+                        column: column.clone(),
+                    },
+                    sources: vec![ColumnOrigin::Concrete {
+                        table: table.clone(),
+                        column,
+                    }],
+                    transform: TransformKind::Direct,
+                }));
+            } else {
+                mappings.push(wildcard_mapping(None, table.clone()));
+            }
+        }
+        Binding::Cte(scope) | Binding::DerivedTable(scope) => expand_scope_columns(
+            *scope,
+            graph,
+            resolved,
+            incoming,
+            catalog,
+            mapping_cache,
+            mappings,
+            visited_scopes,
+        ),
+        Binding::VirtualSource(source) => expand_virtual_source(
+            *source,
+            graph,
+            resolved,
+            incoming,
+            catalog,
+            mapping_cache,
+            mappings,
+        ),
+    }
+}
+
+fn expand_unknown_relation(
+    table: TableRef,
+    catalog: Option<&dyn CatalogProvider>,
+    mappings: &mut Vec<ColumnMapping>,
+) {
+    if let Some(columns) = catalog.and_then(|catalog| catalog.list_columns(&table)) {
+        mappings.extend(columns.into_iter().map(|column| ColumnMapping {
+            target: ColumnRef {
+                table: None,
+                column: column.clone(),
+            },
+            sources: vec![ColumnOrigin::Concrete {
+                table: table.clone(),
+                column,
+            }],
+            transform: TransformKind::Direct,
+        }));
+    } else {
+        mappings.push(wildcard_mapping(None, table));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_star_options(
+    mappings: &mut Vec<ColumnMapping>,
+    start: usize,
+    base: &StarBase,
+    scope: usize,
+    options: &StarOptions,
+    graph: &RawGraph,
+    resolved: &mut Vec<Option<ColumnOrigin>>,
+    incoming: &[Vec<usize>],
+    catalog: Option<&dyn CatalogProvider>,
+    mapping_cache: &mut ScopeMappingCache,
+) {
+    if mappings_have_unknown_shape(&mappings[start..]) {
+        append_unknown_star_options(
+            mappings,
+            start,
+            base,
+            scope,
+            options,
+            graph,
+            resolved,
+            incoming,
+            catalog,
+            mapping_cache,
+        );
+        return;
+    }
+    let original = mappings.split_off(start);
+    let mut retained = Vec::with_capacity(original.len());
+    for mapping in original {
+        let name = &mapping.target.column;
+        let excluded = options
+            .exclude
+            .iter()
+            .any(|excluded| excluded_matches_mapping(excluded, name, &mapping, base));
+        let ilike_mismatch = options
+            .ilike
+            .as_deref()
+            .is_some_and(|pattern| !ilike_matches(pattern, name));
+        if !excluded && !ilike_mismatch {
+            retained.push(mapping);
+        }
+    }
+    for replacement in &options.replace {
+        let Some(index) = retained
+            .iter()
+            .position(|mapping| same_column_name(&mapping.target.column, &replacement.column))
+        else {
+            continue;
+        };
+        let mut visited = HashSet::new();
+        let (sources, edge_kinds, _, inherited_transform) = collect_output_sources(
+            replacement.node_id,
+            graph,
+            resolved,
+            incoming,
+            &mut visited,
+            catalog,
+            mapping_cache,
+        );
+        retained[index].sources = sources;
+        retained[index].transform = merge_transform(
+            &derive_transform(&graph.nodes[replacement.node_id], &edge_kinds),
+            &inherited_transform,
+        );
+    }
+    for (old, new) in &options.rename {
+        if let Some(mapping) = retained
+            .iter_mut()
+            .find(|mapping| same_column_name(&mapping.target.column, old))
+        {
+            mapping.target.column.clone_from(new);
+        }
+    }
+    mappings.extend(retained);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_unknown_star_options(
+    mappings: &mut Vec<ColumnMapping>,
+    start: usize,
+    base: &StarBase,
+    scope: usize,
+    options: &StarOptions,
+    graph: &RawGraph,
+    resolved: &mut Vec<Option<ColumnOrigin>>,
+    incoming: &[Vec<usize>],
+    catalog: Option<&dyn CatalogProvider>,
+    mapping_cache: &mut ScopeMappingCache,
+) {
+    let unknown_sources = mappings[start..].to_vec();
+    for replacement in &options.replace {
+        if !name_passes_star_filters(&replacement.column, options, base) {
+            continue;
+        }
+        let mut visited = HashSet::new();
+        let (sources, edge_kinds, _, inherited_transform) = collect_output_sources(
+            replacement.node_id,
+            graph,
+            resolved,
+            incoming,
+            &mut visited,
+            catalog,
+            mapping_cache,
+        );
+        mappings.push(ColumnMapping {
+            target: ColumnRef {
+                table: None,
+                column: replacement.column.clone(),
+            },
+            sources,
+            transform: merge_transform(
+                &derive_transform(&graph.nodes[replacement.node_id], &edge_kinds),
+                &inherited_transform,
+            ),
+        });
+    }
+    for (old, new) in &options.rename {
+        if !name_passes_star_filters(old, options, base) {
+            continue;
+        }
+        let sources =
+            named_wildcard_sources_for_star(&unknown_sources, old, options, base, scope, graph);
+        if !sources
+            .iter()
+            .any(|source| matches!(source, ColumnOrigin::NamedWildcard { .. }))
+        {
+            continue;
+        }
+        mappings.push(ColumnMapping {
+            target: ColumnRef {
+                table: None,
+                column: new.clone(),
+            },
+            sources,
+            transform: TransformKind::Direct,
+        });
+    }
+}
+
+fn name_passes_star_filters(name: &str, options: &StarOptions, base: &StarBase) -> bool {
+    !options
+        .exclude
+        .iter()
+        .any(|excluded| excluded_matches_name(excluded, name, base))
+        && options
+            .ilike
+            .as_deref()
+            .is_none_or(|pattern| ilike_matches(pattern, name))
+}
+
+fn excluded_matches_name(excluded: &StarColumnName, name: &str, base: &StarBase) -> bool {
+    let Some((excluded_column, qualifier)) = excluded.parts.split_last() else {
+        return false;
+    };
+    same_column_name(name, excluded_column)
+        && (qualifier.is_empty()
+            || matches!(base, StarBase::Qualified(parts) if parts == qualifier))
+}
+
+fn excluded_matches_mapping(
+    excluded: &StarColumnName,
+    column: &str,
+    mapping: &ColumnMapping,
+    base: &StarBase,
+) -> bool {
+    let Some((excluded_column, qualifier)) = excluded.parts.split_last() else {
+        return false;
+    };
+    if !same_column_name(column, excluded_column) {
+        return false;
+    }
+    if qualifier.is_empty() {
+        return true;
+    }
+    if let StarBase::Qualified(parts) = base
+        && parts == qualifier
+    {
+        return true;
+    }
+    mapping.sources.iter().any(|source| {
+        let table = match source {
+            ColumnOrigin::Concrete { table, .. }
+            | ColumnOrigin::Wildcard { table }
+            | ColumnOrigin::NamedWildcard { table, .. } => table,
+            ColumnOrigin::Recursive { base_sources } => {
+                return base_sources
+                    .iter()
+                    .any(|source| relation_matches_qualifier(source, qualifier));
+            }
+            _ => return false,
+        };
+        table_matches_qualifier(table, qualifier)
+    })
+}
+
+fn relation_matches_qualifier(source: &ColumnOrigin, qualifier: &[String]) -> bool {
+    match source {
+        ColumnOrigin::Concrete { table, .. }
+        | ColumnOrigin::Wildcard { table }
+        | ColumnOrigin::NamedWildcard { table, .. } => table_matches_qualifier(table, qualifier),
+        _ => false,
+    }
+}
+
+fn table_matches_qualifier(table: &TableRef, qualifier: &[String]) -> bool {
+    match qualifier {
+        [name] => table.table == *name,
+        [schema, name] => table.schema.as_deref() == Some(schema) && table.table == *name,
+        [catalog, schema, name] => {
+            table.catalog.as_deref() == Some(catalog)
+                && table.schema.as_deref() == Some(schema)
+                && table.table == *name
+        }
+        _ => false,
     }
 }
 
@@ -758,9 +1316,15 @@ fn expand_scope_columns(
         return;
     }
     for col in graph.scopes.output_columns(scope_id) {
-        if let RawNode::Star { table, scope } = &graph.nodes[col.node_id] {
+        if let RawNode::Star {
+            base,
+            options,
+            scope,
+        } = &graph.nodes[col.node_id]
+        {
             expand_star(
-                table.as_ref(),
+                base,
+                options,
                 *scope,
                 graph,
                 resolved,
@@ -1146,30 +1710,249 @@ fn resolve_named_scope_reference(
         let (sources, has_back) = flatten_mapping_sources(&mapping.sources);
         return Some((sources, has_back, mapping.transform.clone()));
     }
-    // A catalog-less star has no individual named mapping. Returning its
-    // wildcard origin is safer than falling through to a fabricated concrete
-    // source for a named reference through the CTE/derived scope.
-    let wildcard_sources = mappings
-        .iter()
-        .flat_map(|mapping| mapping.sources.iter())
-        .filter_map(|source| match source {
-            ColumnOrigin::Wildcard { table } => Some(ColumnOrigin::NamedWildcard {
-                table: table.clone(),
-                column: name.clone(),
-            }),
-            ColumnOrigin::Recursive { base_sources } => {
-                base_sources.iter().find_map(|source| match source {
-                    ColumnOrigin::Wildcard { table } => Some(ColumnOrigin::NamedWildcard {
-                        table: table.clone(),
+    let requested_name =
+        match scope_star_name_decision(target_scope, name, graph, &mut HashSet::new()) {
+            StarNameDecision::Denied | StarNameDecision::Ambiguous => {
+                return Some((
+                    vec![ColumnOrigin::Ambiguous {
                         column: name.clone(),
-                    }),
-                    _ => None,
-                })
+                        candidates: Vec::new(),
+                    }],
+                    false,
+                    TransformKind::Direct,
+                ));
             }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+            StarNameDecision::Replaced(node_id) => {
+                let (sources, _, has_back, transform) = collect_output_sources(
+                    node_id,
+                    graph,
+                    resolved,
+                    incoming,
+                    &mut HashSet::new(),
+                    catalog,
+                    mapping_cache,
+                );
+                return Some((sources, has_back, transform));
+            }
+            StarNameDecision::Renamed(old) => old,
+            StarNameDecision::Allowed => name.clone(),
+        };
+    let wildcard_sources = named_wildcard_sources_for_scope(
+        target_scope,
+        &requested_name,
+        graph,
+        resolved,
+        incoming,
+        catalog,
+        mapping_cache,
+    );
     (!wildcard_sources.is_empty()).then_some((wildcard_sources, false, TransformKind::Direct))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn named_wildcard_sources_for_scope(
+    scope: usize,
+    column: &str,
+    graph: &RawGraph,
+    resolved: &mut Vec<Option<ColumnOrigin>>,
+    incoming: &[Vec<usize>],
+    catalog: Option<&dyn CatalogProvider>,
+    mapping_cache: &mut ScopeMappingCache,
+) -> Vec<ColumnOrigin> {
+    match graph.scopes.output_plan(scope) {
+        OutputPlan::Projection => {
+            let mut sources = Vec::new();
+            for output in graph.scopes.output_columns(scope) {
+                let RawNode::Star {
+                    base,
+                    options,
+                    scope: star_scope,
+                } = &graph.nodes[output.node_id]
+                else {
+                    continue;
+                };
+                let source_column = match star_name_decision(options, column, Some(base)) {
+                    StarNameDecision::Allowed => column.to_string(),
+                    StarNameDecision::Renamed(old) => old,
+                    StarNameDecision::Denied
+                    | StarNameDecision::Replaced(_)
+                    | StarNameDecision::Ambiguous => continue,
+                };
+                let mut expanded = Vec::new();
+                expand_star(
+                    base,
+                    &StarOptions::default(),
+                    *star_scope,
+                    graph,
+                    resolved,
+                    incoming,
+                    catalog,
+                    mapping_cache,
+                    &mut expanded,
+                    &mut HashSet::new(),
+                );
+                sources.extend(named_wildcard_sources_for_star(
+                    &expanded,
+                    &source_column,
+                    options,
+                    base,
+                    *star_scope,
+                    graph,
+                ));
+            }
+            sources
+        }
+        OutputPlan::Delegate(child) => named_wildcard_sources_for_scope(
+            *child,
+            column,
+            graph,
+            resolved,
+            incoming,
+            catalog,
+            mapping_cache,
+        ),
+        // Set-operation output names and modifiers come from the left branch,
+        // but lineage provenance is collected from every branch. A denied
+        // right branch remains an explicit uncertainty marker because its
+        // unknown-width slot cannot be aligned safely.
+        OutputPlan::SetOperation { left, right, .. } => {
+            let mut sources = named_wildcard_sources_for_scope(
+                *left,
+                column,
+                graph,
+                resolved,
+                incoming,
+                catalog,
+                mapping_cache,
+            );
+            let right_sources = named_wildcard_sources_for_scope(
+                *right,
+                column,
+                graph,
+                resolved,
+                incoming,
+                catalog,
+                mapping_cache,
+            );
+            if right_sources.is_empty()
+                && matches!(
+                    scope_star_name_decision(*right, column, graph, &mut HashSet::new()),
+                    StarNameDecision::Denied | StarNameDecision::Ambiguous
+                )
+            {
+                sources.push(ColumnOrigin::Ambiguous {
+                    column: column.to_string(),
+                    candidates: Vec::new(),
+                });
+            } else {
+                sources.extend(right_sources);
+            }
+            sources
+        }
+    }
+}
+
+fn named_wildcard_sources_for_star(
+    mappings: &[ColumnMapping],
+    column: &str,
+    options: &StarOptions,
+    base: &StarBase,
+    scope: usize,
+    graph: &RawGraph,
+) -> Vec<ColumnOrigin> {
+    let mut sources = Vec::new();
+    let mut wildcard_seen = false;
+    let mut denied = false;
+    for mapping in mappings {
+        for source in &mapping.sources {
+            match source {
+                ColumnOrigin::Wildcard { table } => {
+                    wildcard_seen = true;
+                    if options.exclude.iter().any(|excluded| {
+                        excluded_matches_source(excluded, column, source, base, scope, graph)
+                    }) {
+                        denied = true;
+                    } else {
+                        sources.push(ColumnOrigin::NamedWildcard {
+                            table: table.clone(),
+                            column: column.to_string(),
+                        });
+                    }
+                }
+                ColumnOrigin::Recursive { base_sources } => {
+                    for nested in base_sources {
+                        if let ColumnOrigin::Wildcard { table } = nested {
+                            wildcard_seen = true;
+                            if options.exclude.iter().any(|excluded| {
+                                excluded_matches_source(
+                                    excluded, column, nested, base, scope, graph,
+                                )
+                            }) {
+                                denied = true;
+                            } else {
+                                sources.push(ColumnOrigin::NamedWildcard {
+                                    table: table.clone(),
+                                    column: column.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if sources.is_empty() && wildcard_seen && denied {
+        sources.push(ColumnOrigin::Ambiguous {
+            column: column.to_string(),
+            candidates: Vec::new(),
+        });
+    }
+    sources
+}
+
+fn excluded_matches_source(
+    excluded: &StarColumnName,
+    column: &str,
+    source: &ColumnOrigin,
+    base: &StarBase,
+    scope: usize,
+    graph: &RawGraph,
+) -> bool {
+    let Some((excluded_column, qualifier)) = excluded.parts.split_last() else {
+        return false;
+    };
+    if !same_column_name(column, excluded_column) {
+        return false;
+    }
+    if qualifier.is_empty() {
+        return true;
+    }
+    if let StarBase::Qualified(parts) = base
+        && parts == qualifier
+    {
+        return true;
+    }
+    if qualifier.len() == 1
+        && relation_from_origin(source).is_some_and(|table| {
+            graph.scopes.visible_bindings(scope).iter().any(|(name, binding)| {
+                name == &qualifier[0]
+                    && matches!(binding, Binding::Table(binding_table) if binding_table == table)
+            })
+        })
+    {
+        return true;
+    }
+    relation_from_origin(source).is_some_and(|table| table_matches_qualifier(table, qualifier))
+}
+
+fn relation_from_origin(source: &ColumnOrigin) -> Option<&TableRef> {
+    match source {
+        ColumnOrigin::Wildcard { table }
+        | ColumnOrigin::Concrete { table, .. }
+        | ColumnOrigin::NamedWildcard { table, .. } => Some(table),
+        _ => None,
+    }
 }
 
 fn flatten_mapping_sources(sources: &[ColumnOrigin]) -> (Vec<ColumnOrigin>, bool) {
@@ -1185,6 +1968,121 @@ fn flatten_mapping_sources(sources: &[ColumnOrigin]) -> (Vec<ColumnOrigin>, bool
         }
     }
     (flattened, has_back)
+}
+
+#[derive(Clone)]
+enum StarNameDecision {
+    Allowed,
+    Denied,
+    Renamed(String),
+    Replaced(NodeId),
+    Ambiguous,
+}
+
+fn star_name_decision(
+    options: &StarOptions,
+    name: &str,
+    base: Option<&StarBase>,
+) -> StarNameDecision {
+    if options.exclude.iter().any(|excluded| {
+        excluded.parts.len() == 1 && same_column_name(name, &excluded.parts[0])
+            || base.is_some_and(|base| excluded_matches_name(excluded, name, base))
+    }) || options
+        .ilike
+        .as_deref()
+        .is_some_and(|pattern| !ilike_matches(pattern, name))
+    {
+        return StarNameDecision::Denied;
+    }
+    if let Some(replacement) = options
+        .replace
+        .iter()
+        .find(|replacement| same_column_name(name, &replacement.column))
+    {
+        return StarNameDecision::Replaced(replacement.node_id);
+    }
+    if let Some((old, _)) = options
+        .rename
+        .iter()
+        .find(|(_, new)| same_column_name(name, new))
+    {
+        return StarNameDecision::Renamed(old.clone());
+    }
+    if options
+        .rename
+        .iter()
+        .any(|(old, _)| same_column_name(name, old))
+    {
+        return StarNameDecision::Denied;
+    }
+    StarNameDecision::Allowed
+}
+
+fn scope_star_name_decision(
+    scope: usize,
+    name: &str,
+    graph: &RawGraph,
+    visited: &mut HashSet<usize>,
+) -> StarNameDecision {
+    if !visited.insert(scope) {
+        return StarNameDecision::Allowed;
+    }
+    match graph.scopes.output_plan(scope) {
+        OutputPlan::Projection => combine_star_name_decisions(
+            graph
+                .scopes
+                .output_columns(scope)
+                .iter()
+                .filter_map(|column| {
+                    if let RawNode::Star { base, options, .. } = &graph.nodes[column.node_id] {
+                        Some(star_name_decision(options, name, Some(base)))
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+        ),
+        OutputPlan::Delegate(child) => scope_star_name_decision(*child, name, graph, visited),
+        // The left branch defines set-operation output names and modifiers.
+        OutputPlan::SetOperation { left, .. } => {
+            scope_star_name_decision(*left, name, graph, visited)
+        }
+    }
+}
+
+fn combine_star_name_decisions(decisions: Vec<StarNameDecision>) -> StarNameDecision {
+    let mut has_allowed = false;
+    let mut has_denied = false;
+    let mut specific: Option<StarNameDecision> = None;
+    for decision in decisions {
+        match decision {
+            StarNameDecision::Allowed => has_allowed = true,
+            StarNameDecision::Denied => has_denied = true,
+            StarNameDecision::Ambiguous => return StarNameDecision::Ambiguous,
+            StarNameDecision::Renamed(old) => match &specific {
+                None => specific = Some(StarNameDecision::Renamed(old)),
+                Some(StarNameDecision::Renamed(existing)) if existing == &old => {}
+                Some(_) => return StarNameDecision::Ambiguous,
+            },
+            StarNameDecision::Replaced(node_id) => match specific {
+                None => specific = Some(StarNameDecision::Replaced(node_id)),
+                Some(StarNameDecision::Replaced(existing)) if existing == node_id => {}
+                Some(_) => return StarNameDecision::Ambiguous,
+            },
+        }
+    }
+    if has_allowed && specific.is_some() {
+        return StarNameDecision::Ambiguous;
+    }
+    if has_allowed {
+        StarNameDecision::Allowed
+    } else if let Some(specific) = specific {
+        specific
+    } else if has_denied {
+        StarNameDecision::Denied
+    } else {
+        StarNameDecision::Allowed
+    }
 }
 
 fn resolve_node(
@@ -1294,9 +2192,7 @@ fn resolve_node(
             mapping_cache,
         ),
 
-        RawNode::Star { table, .. } => table
-            .as_ref()
-            .map(|t| ColumnOrigin::Wildcard { table: t.clone() }),
+        RawNode::Star { .. } => None,
 
         RawNode::Output { .. } => None,
     };
@@ -1618,25 +2514,51 @@ fn resolve_through_scope(
             origins.into_iter().next()
         };
     }
-    if let Some(source) = mappings
-        .iter()
-        .flat_map(|mapping| mapping.sources.iter())
-        .find_map(|source| match source {
-            ColumnOrigin::Wildcard { table } => Some(ColumnOrigin::NamedWildcard {
-                table: table.clone(),
-                column: column_name.to_string(),
-            }),
-            ColumnOrigin::Recursive { base_sources } => {
-                base_sources.iter().find_map(|source| match source {
-                    ColumnOrigin::Wildcard { table } => Some(ColumnOrigin::NamedWildcard {
-                        table: table.clone(),
-                        column: column_name.to_string(),
-                    }),
-                    _ => None,
-                })
+    let requested_name =
+        match scope_star_name_decision(target_scope, column_name, graph, &mut HashSet::new()) {
+            StarNameDecision::Denied | StarNameDecision::Ambiguous => {
+                return Some(ColumnOrigin::Ambiguous {
+                    column: column_name.to_string(),
+                    candidates: Vec::new(),
+                });
             }
-            _ => None,
-        })
+            StarNameDecision::Replaced(node_id) => {
+                let (sources, _, has_back, _) = collect_output_sources(
+                    node_id,
+                    graph,
+                    resolved,
+                    incoming,
+                    &mut HashSet::new(),
+                    catalog,
+                    mapping_cache,
+                );
+                return if has_back {
+                    Some(ColumnOrigin::Recursive {
+                        base_sources: sources,
+                    })
+                } else if sources.len() == 1 {
+                    sources.into_iter().next()
+                } else {
+                    Some(ColumnOrigin::Ambiguous {
+                        column: column_name.to_string(),
+                        candidates: Vec::new(),
+                    })
+                };
+            }
+            StarNameDecision::Renamed(old) => old,
+            StarNameDecision::Allowed => column_name.to_string(),
+        };
+    if let Some(source) = named_wildcard_sources_for_scope(
+        target_scope,
+        &requested_name,
+        graph,
+        resolved,
+        incoming,
+        catalog,
+        mapping_cache,
+    )
+    .into_iter()
+    .next()
     {
         return Some(source);
     }

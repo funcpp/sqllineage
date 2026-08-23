@@ -1,8 +1,34 @@
 use crate::graph::edge::EdgeKind;
 use crate::graph::scope::{Binding, ScopeId};
-use crate::types::TableRef;
-
 pub(crate) type NodeId = usize;
+
+/// The expression which a wildcard expands from. Keeping the original parts
+/// lets resolution distinguish a relation prefix from a nested field path.
+#[derive(Debug, Clone)]
+pub(crate) enum StarBase {
+    Unqualified,
+    Qualified(Vec<String>),
+    Expr(Vec<NodeId>),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StarColumnName {
+    pub parts: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct StarOptions {
+    pub exclude: Vec<StarColumnName>,
+    pub ilike: Option<String>,
+    pub replace: Vec<StarReplacement>,
+    pub rename: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StarReplacement {
+    pub column: String,
+    pub node_id: NodeId,
+}
 
 #[derive(Debug, Clone)]
 pub(crate) enum RawNode {
@@ -27,7 +53,8 @@ pub(crate) enum RawNode {
     },
     /// SELECT * or table.* — expandable with catalog.
     Star {
-        table: Option<TableRef>,
+        base: StarBase,
+        options: StarOptions,
         scope: ScopeId,
     },
     /// Unqualified column in multi-table scope.
