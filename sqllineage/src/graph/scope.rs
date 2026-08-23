@@ -14,6 +14,7 @@ struct Scope {
     bindings: HashMap<String, Binding>,
     anonymous_derived: Vec<ScopeId>,
     output_columns: Vec<ScopeColumn>,
+    output_plan: OutputPlan,
 }
 
 #[derive(Debug, Clone)]
@@ -23,6 +24,19 @@ pub(crate) enum ScopeKind {
     Subquery,
     DerivedTable,
     SetOperation,
+}
+
+/// Describes how a scope's output columns are assembled. This is retained in
+/// the raw graph until catalog expansion and positional set-operation merge.
+#[derive(Debug, Clone)]
+pub(crate) enum OutputPlan {
+    Projection,
+    SetOperation {
+        left: ScopeId,
+        right: ScopeId,
+        recursive: bool,
+    },
+    Delegate(ScopeId),
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +60,7 @@ impl ScopeTree {
                 bindings: HashMap::new(),
                 anonymous_derived: Vec::new(),
                 output_columns: Vec::new(),
+                output_plan: OutputPlan::Projection,
             }],
         }
     }
@@ -61,6 +76,7 @@ impl ScopeTree {
             bindings: HashMap::new(),
             anonymous_derived: Vec::new(),
             output_columns: Vec::new(),
+            output_plan: OutputPlan::Projection,
         });
         id
     }
@@ -89,6 +105,14 @@ impl ScopeTree {
 
     pub fn output_columns(&self, scope: ScopeId) -> &[ScopeColumn] {
         &self.scopes[scope].output_columns
+    }
+
+    pub fn set_output_plan(&mut self, scope: ScopeId, plan: OutputPlan) {
+        self.scopes[scope].output_plan = plan;
+    }
+
+    pub fn output_plan(&self, scope: ScopeId) -> &OutputPlan {
+        &self.scopes[scope].output_plan
     }
 
     pub fn add_anonymous_derived(&mut self, parent: ScopeId, child: ScopeId) {

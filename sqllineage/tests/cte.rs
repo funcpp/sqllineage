@@ -85,6 +85,12 @@ fn recursive_cte_base_case() {
     match &m.sources[0] {
         ColumnOrigin::Recursive { base_sources } => {
             assert!(!base_sources.is_empty());
+            assert!(base_sources.iter().all(|source| {
+                !matches!(
+                    source,
+                    ColumnOrigin::Concrete { table, .. } if table.table == "cte"
+                )
+            }));
             match &base_sources[0] {
                 ColumnOrigin::Concrete { table, column } => {
                     assert_eq!(table.table, "t");
@@ -162,6 +168,58 @@ fn union_all_columns() {
     assert_eq!(
         concrete_sources(m_b),
         vec![("t1".into(), "b".into()), ("t2".into(), "d".into())]
+    );
+}
+
+#[test]
+fn union_keeps_left_names_and_merges_explicit_columns_positionally() {
+    let sql = "SELECT a AS left_name, b AS second_name FROM t1 \
+               UNION ALL SELECT c AS right_name, d AS other_name FROM t2";
+    let result = analyze_one(sql);
+    assert_eq!(result.columns.mappings.len(), 2);
+    assert_eq!(result.columns.mappings[0].target.column, "left_name");
+    assert_eq!(result.columns.mappings[1].target.column, "second_name");
+    assert_eq!(
+        concrete_sources(&result.columns.mappings[0]),
+        vec![("t1".into(), "a".into()), ("t2".into(), "c".into())]
+    );
+    assert_eq!(
+        concrete_sources(&result.columns.mappings[1]),
+        vec![("t1".into(), "b".into()), ("t2".into(), "d".into())]
+    );
+}
+
+#[test]
+fn nested_union_preserves_outer_left_names_and_all_branch_sources() {
+    let sql = "SELECT a AS first_name FROM t1 \
+               UNION ALL SELECT b AS second_name FROM t2 \
+               UNION ALL SELECT c AS third_name FROM t3";
+    let result = analyze_one(sql);
+    assert_eq!(result.columns.mappings.len(), 1);
+    assert_eq!(result.columns.mappings[0].target.column, "first_name");
+    assert_eq!(
+        concrete_sources(&result.columns.mappings[0]),
+        vec![
+            ("t1".into(), "a".into()),
+            ("t2".into(), "b".into()),
+            ("t3".into(), "c".into())
+        ]
+    );
+}
+
+#[test]
+fn union_transform_prefers_aggregation_across_branches() {
+    let sql = "SELECT SUM(a) AS value FROM t1 UNION ALL SELECT b AS other_value FROM t2";
+    let result = analyze_one(sql);
+    assert_eq!(result.columns.mappings.len(), 1);
+    assert_eq!(result.columns.mappings[0].target.column, "value");
+    assert_eq!(
+        concrete_sources(&result.columns.mappings[0]),
+        vec![("t1".into(), "a".into()), ("t2".into(), "b".into())]
+    );
+    assert_eq!(
+        result.columns.mappings[0].transform,
+        TransformKind::Aggregation
     );
 }
 

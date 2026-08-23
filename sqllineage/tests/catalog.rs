@@ -163,3 +163,156 @@ fn catalog_preserves_qualified_columns() {
         vec![("orders".into(), "amount".into())]
     );
 }
+
+struct SetOperationCatalog;
+
+impl CatalogProvider for SetOperationCatalog {
+    fn list_columns(&self, table: &TableRef) -> Option<Vec<String>> {
+        match table.table.as_str() {
+            "users" => Some(vec!["id".into(), "name".into(), "email".into()]),
+            "other" => Some(vec!["a".into(), "b".into(), "c".into(), "d".into()]),
+            "ext_a" => Some(vec!["col_x".into(), "col_y".into()]),
+            _ => None,
+        }
+    }
+
+    fn resolve_column(&self, _column: &str, _candidates: &[TableRef]) -> Option<TableRef> {
+        None
+    }
+}
+
+#[test]
+fn set_operation_expands_leading_star_before_positional_merge() {
+    let sql = "SELECT * FROM users UNION ALL SELECT a, b, c FROM other";
+    let result = analyze(
+        sql,
+        AnalyzeOptions {
+            catalog: Some(Box::new(SetOperationCatalog)),
+            ..AnalyzeOptions::default()
+        },
+    )
+    .expect("parse")
+    .into_iter()
+    .next()
+    .unwrap();
+
+    assert_eq!(result.columns.mappings.len(), 3);
+    assert_eq!(result.columns.mappings[0].target.column, "id");
+    assert_eq!(result.columns.mappings[1].target.column, "name");
+    assert_eq!(result.columns.mappings[2].target.column, "email");
+    assert_eq!(
+        concrete_sources(&result.columns.mappings[0]),
+        vec![("other".into(), "a".into()), ("users".into(), "id".into())]
+    );
+    assert_eq!(
+        concrete_sources(&result.columns.mappings[1]),
+        vec![
+            ("other".into(), "b".into()),
+            ("users".into(), "name".into())
+        ]
+    );
+}
+
+#[test]
+fn set_operation_preserves_non_leading_star_contribution() {
+    let sql = "SELECT id, * FROM users UNION ALL SELECT a, b, c, d FROM other";
+    let result = analyze(
+        sql,
+        AnalyzeOptions {
+            catalog: Some(Box::new(SetOperationCatalog)),
+            ..AnalyzeOptions::default()
+        },
+    )
+    .expect("parse")
+    .into_iter()
+    .next()
+    .unwrap();
+
+    assert_eq!(result.columns.mappings.len(), 4);
+    assert_eq!(
+        concrete_sources(&result.columns.mappings[1]),
+        vec![("other".into(), "b".into()), ("users".into(), "id".into())]
+    );
+    assert_eq!(
+        concrete_sources(&result.columns.mappings[3]),
+        vec![
+            ("other".into(), "d".into()),
+            ("users".into(), "email".into())
+        ]
+    );
+}
+
+#[test]
+fn set_operation_branches_survive_cte_and_derived_boundaries() {
+    let sql = "WITH combined AS (SELECT * FROM users UNION ALL SELECT a, b, c FROM other) \
+               SELECT * FROM (SELECT * FROM combined) derived";
+    let result = analyze(
+        sql,
+        AnalyzeOptions {
+            catalog: Some(Box::new(SetOperationCatalog)),
+            ..AnalyzeOptions::default()
+        },
+    )
+    .expect("parse")
+    .into_iter()
+    .next()
+    .unwrap();
+
+    assert_eq!(result.columns.mappings.len(), 3);
+    assert_eq!(
+        concrete_sources(&result.columns.mappings[1]),
+        vec![
+            ("other".into(), "b".into()),
+            ("users".into(), "name".into())
+        ]
+    );
+}
+
+#[test]
+fn non_leading_star_in_right_set_branch_contributes_to_named_output() {
+    let sql = "WITH lit AS (SELECT 1 AS col_a), \
+               u AS (SELECT col_a FROM lit UNION ALL SELECT * FROM ext_a) \
+               SELECT col_a FROM u";
+    let result = analyze(
+        sql,
+        AnalyzeOptions {
+            catalog: Some(Box::new(SetOperationCatalog)),
+            ..AnalyzeOptions::default()
+        },
+    )
+    .expect("parse")
+    .into_iter()
+    .next()
+    .unwrap();
+
+    assert_eq!(result.columns.mappings.len(), 1);
+    assert_eq!(
+        concrete_sources(&result.columns.mappings[0]),
+        vec![("ext_a".into(), "col_x".into())]
+    );
+}
+
+#[test]
+fn named_lookup_through_set_operation_cte_keeps_all_branches() {
+    let sql = "WITH combined AS (SELECT * FROM users UNION ALL SELECT a, b, c FROM other) \
+               SELECT name FROM combined";
+    let result = analyze(
+        sql,
+        AnalyzeOptions {
+            catalog: Some(Box::new(SetOperationCatalog)),
+            ..AnalyzeOptions::default()
+        },
+    )
+    .expect("parse")
+    .into_iter()
+    .next()
+    .unwrap();
+
+    assert_eq!(
+        concrete_sources(&result.columns.mappings[0]),
+        vec![
+            ("other".into(), "b".into()),
+            ("users".into(), "name".into())
+        ]
+    );
+}
