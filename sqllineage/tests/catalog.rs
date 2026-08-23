@@ -316,3 +316,22 @@ fn named_lookup_through_set_operation_cte_keeps_all_branches() {
         ]
     );
 }
+
+#[test]
+fn catalog_known_set_arity_mismatch_is_an_analysis_error() {
+    let result = analyze(
+        "SELECT * FROM users UNION ALL SELECT a, b, c, d FROM other",
+        AnalyzeOptions {
+            catalog: Some(Box::new(SetOperationCatalog)),
+            ..AnalyzeOptions::default()
+        },
+    );
+    let error = match result {
+        Ok(_) => panic!("catalog-known arity mismatch should not be truncated"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error.message,
+        "set operation arity mismatch: left has 3 columns, right has 4 columns"
+    );
+}

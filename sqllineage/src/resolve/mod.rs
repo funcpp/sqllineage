@@ -9,7 +9,7 @@ use crate::graph::node::{NodeId, RawNode};
 use crate::graph::scope::{Binding, OutputPlan, ScopeTree};
 use crate::types::{
     AnalyzeResult, CatalogProvider, ColumnLineage, ColumnMapping, ColumnOrigin, ColumnRef,
-    StatementType, TableRef, TransformKind, Warning, WarningKind,
+    ParseError, StatementType, TableRef, TransformKind, Warning, WarningKind,
 };
 
 /// Resolve `RawGraph` into `AnalyzeResult`.
@@ -19,17 +19,17 @@ pub(crate) fn resolve(
     catalog: Option<&dyn CatalogProvider>,
     mut warnings: Vec<Warning>,
     statement_type: StatementType,
-) -> AnalyzeResult {
+) -> Result<AnalyzeResult, ParseError> {
     graph.tables.inputs.sort();
     graph.tables.inputs.dedup();
 
     if graph.nodes.is_empty() {
-        return AnalyzeResult {
+        return Ok(AnalyzeResult {
             statement_type,
             tables: graph.tables,
             columns: ColumnLineage::default(),
             warnings,
-        };
+        });
     }
 
     if topo::topological_sort(&graph.nodes, &graph.edges).is_err() {
@@ -37,13 +37,15 @@ pub(crate) fn resolve(
             kind: WarningKind::UnexpectedCycle,
             location: None,
         });
-        return AnalyzeResult {
+        return Ok(AnalyzeResult {
             statement_type,
             tables: graph.tables,
             columns: ColumnLineage::default(),
             warnings,
-        };
+        });
     }
+
+    validate_set_arities(&graph, catalog)?;
 
     let mut incoming: Vec<Vec<usize>> = vec![vec![]; graph.nodes.len()];
     for (idx, edge) in graph.edges.iter().enumerate() {
@@ -63,12 +65,119 @@ pub(crate) fn resolve(
         catalog,
     );
 
-    AnalyzeResult {
+    Ok(AnalyzeResult {
         statement_type,
         tables: graph.tables,
         columns: ColumnLineage { mappings },
         warnings,
+    })
+}
+
+const SET_ARITY_ERROR_PREFIX: &str = "set operation arity mismatch";
+
+fn validate_set_arities(
+    graph: &RawGraph,
+    catalog: Option<&dyn CatalogProvider>,
+) -> Result<(), ParseError> {
+    let mut active = HashSet::new();
+    let _ = scope_arity(ScopeTree::root(), graph, catalog, &mut active)?;
+    Ok(())
+}
+
+/// Return an exact output width when every star in a scope can be expanded;
+/// otherwise return `None` and leave the eventual merge conservative.
+fn scope_arity(
+    scope: usize,
+    graph: &RawGraph,
+    catalog: Option<&dyn CatalogProvider>,
+    active: &mut HashSet<usize>,
+) -> Result<Option<usize>, ParseError> {
+    if !active.insert(scope) {
+        return Ok(None);
     }
+    let result = match graph.scopes.output_plan(scope).clone() {
+        OutputPlan::Projection => {
+            let mut width = 0;
+            let mut exact = true;
+            for col in graph.scopes.output_columns(scope) {
+                if let RawNode::Star {
+                    table,
+                    scope: star_scope,
+                } = &graph.nodes[col.node_id]
+                {
+                    match star_arity(table.as_ref(), *star_scope, graph, catalog, active)? {
+                        Some(star_width) => width += star_width,
+                        None => exact = false,
+                    }
+                } else {
+                    width += 1;
+                }
+            }
+            exact.then_some(width)
+        }
+        OutputPlan::Delegate(child) => scope_arity(child, graph, catalog, active)?,
+        OutputPlan::SetOperation { left, right, .. } => {
+            let left_width = scope_arity(left, graph, catalog, active)?;
+            let right_width = scope_arity(right, graph, catalog, active)?;
+            match (left_width, right_width) {
+                (Some(left), Some(right)) if left != right => {
+                    return Err(ParseError {
+                        message: format!(
+                            "{SET_ARITY_ERROR_PREFIX}: left has {left} columns, right has {right} columns"
+                        ),
+                    });
+                }
+                (Some(width), Some(_)) => Some(width),
+                _ => None,
+            }
+        }
+    };
+    active.remove(&scope);
+    Ok(result)
+}
+
+fn star_arity(
+    table: Option<&TableRef>,
+    scope: usize,
+    graph: &RawGraph,
+    catalog: Option<&dyn CatalogProvider>,
+    active: &mut HashSet<usize>,
+) -> Result<Option<usize>, ParseError> {
+    if let Some(table) = table {
+        let binding = graph.scopes.lookup(scope, &table.table).cloned();
+        return match binding {
+            Some(Binding::Cte(child) | Binding::DerivedTable(child)) => {
+                scope_arity(child, graph, catalog, active)
+            }
+            _ => Ok(catalog
+                .and_then(|catalog| catalog.list_columns(table))
+                .map(|columns| columns.len())),
+        };
+    }
+
+    let bindings = effective_bindings(scope, graph);
+    let mut width = 0;
+    for (_, binding) in bindings {
+        let binding_width = match binding {
+            Binding::Table(table) => catalog
+                .and_then(|catalog| catalog.list_columns(&table))
+                .map(|columns| columns.len()),
+            Binding::Cte(child) | Binding::DerivedTable(child) => {
+                scope_arity(child, graph, catalog, active)?
+            }
+        };
+        match binding_width {
+            Some(binding_width) => width += binding_width,
+            None => return Ok(None),
+        }
+    }
+    for &child in graph.scopes.anonymous_derived(scope) {
+        match scope_arity(child, graph, catalog, active)? {
+            Some(child_width) => width += child_width,
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(width))
 }
 
 fn effective_bindings(scope: usize, graph: &RawGraph) -> Vec<(String, Binding)> {
@@ -170,6 +279,17 @@ fn resolve_scope_mappings(
             } else {
                 resolve_scope_mappings(right, graph, resolved, incoming, output_table, catalog)
             };
+            // A wildcard without catalog metadata is a variable-width slot.
+            // Positional alignment at or after it would fabricate an ordinal
+            // and lose the remaining branch columns. Merge only the exact
+            // prefix before the first wildcard, then retain both tails and
+            // expose the Wildcard origin.
+            if !recursive
+                && (mappings_have_unknown_shape(&left_mappings)
+                    || mappings_have_unknown_shape(&right_mappings))
+            {
+                return merge_unknown_shape_mappings(left_mappings, right_mappings);
+            }
             // The branch resolvers expand stars independently. Preserve the
             // left branch's names and order, as SQL set operations do.
             let mut merged = Vec::with_capacity(left_mappings.len());
@@ -199,6 +319,85 @@ fn resolve_scope_mappings(
             merged
         }
     }
+}
+
+fn mappings_have_unknown_shape(mappings: &[ColumnMapping]) -> bool {
+    mappings.iter().any(|mapping| {
+        mapping.sources.iter().any(|source| match source {
+            ColumnOrigin::Wildcard { .. } => true,
+            ColumnOrigin::Recursive { base_sources } => base_sources
+                .iter()
+                .any(|source| matches!(source, ColumnOrigin::Wildcard { .. })),
+            _ => false,
+        })
+    })
+}
+
+fn merge_unknown_shape_mappings(
+    left: Vec<ColumnMapping>,
+    right: Vec<ColumnMapping>,
+) -> Vec<ColumnMapping> {
+    let left_barrier = first_unknown_mapping(&left).unwrap_or(left.len());
+    let right_barrier = first_unknown_mapping(&right).unwrap_or(right.len());
+    let prefix_len = left_barrier.min(right_barrier);
+    let left_unknown = wildcard_sources(&left);
+    let right_unknown = wildcard_sources(&right);
+    let mut merged = Vec::with_capacity(left.len() + right.len() - prefix_len);
+
+    for (left_mapping, right_mapping) in left.iter().zip(right.iter()).take(prefix_len) {
+        let mut sources = left_mapping.sources.clone();
+        sources.extend(right_mapping.sources.clone());
+        merged.push(ColumnMapping {
+            target: left_mapping.target.clone(),
+            sources,
+            transform: merge_transform(&left_mapping.transform, &right_mapping.transform),
+        });
+    }
+    merged.extend(
+        left.into_iter()
+            .skip(prefix_len)
+            .map(|mapping| append_unknown_sources(mapping, &right_unknown)),
+    );
+    merged.extend(
+        right
+            .into_iter()
+            .skip(prefix_len)
+            .map(|mapping| append_unknown_sources(mapping, &left_unknown)),
+    );
+    merged
+}
+
+fn first_unknown_mapping(mappings: &[ColumnMapping]) -> Option<usize> {
+    mappings
+        .iter()
+        .position(|mapping| mappings_have_unknown_shape(std::slice::from_ref(mapping)))
+}
+
+fn wildcard_sources(mappings: &[ColumnMapping]) -> Vec<ColumnOrigin> {
+    let mut sources = Vec::new();
+    for mapping in mappings {
+        for source in &mapping.sources {
+            match source {
+                ColumnOrigin::Wildcard { .. } => sources.push(source.clone()),
+                ColumnOrigin::Recursive { base_sources } => sources.extend(
+                    base_sources
+                        .iter()
+                        .filter(|source| matches!(source, ColumnOrigin::Wildcard { .. }))
+                        .cloned(),
+                ),
+                _ => {}
+            }
+        }
+    }
+    sources
+}
+
+fn append_unknown_sources(
+    mut mapping: ColumnMapping,
+    unknown_sources: &[ColumnOrigin],
+) -> ColumnMapping {
+    mapping.sources.extend(unknown_sources.iter().cloned());
+    mapping
 }
 
 fn merge_transform(left: &TransformKind, right: &TransformKind) -> TransformKind {

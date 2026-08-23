@@ -210,7 +210,7 @@ pub enum Dialect {
     BigQuery,
 }
 
-/// Error returned when SQL parsing fails.
+/// Error returned when SQL parsing or semantic validation fails.
 #[derive(Debug, Clone)]
 pub struct ParseError {
     pub message: String,
