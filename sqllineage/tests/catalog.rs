@@ -1,7 +1,7 @@
 mod common;
 
 use common::find_mapping;
-use sqllineage::{AnalyzeOptions, CatalogProvider, ColumnOrigin, TableRef, analyze};
+use sqllineage::{AnalyzeOptions, CatalogProvider, ColumnOrigin, Dialect, TableRef, analyze};
 
 struct MockCatalog;
 
@@ -32,6 +32,18 @@ impl CatalogProvider for EagerCatalog {
 
     fn resolve_column(&self, _column: &str, _candidates: &[TableRef]) -> Option<TableRef> {
         Some(TableRef::new("fabricated"))
+    }
+}
+
+struct AliasCatalog;
+
+impl CatalogProvider for AliasCatalog {
+    fn list_columns(&self, table: &TableRef) -> Option<Vec<String>> {
+        (table.table == "actual_table").then(|| vec!["id".into(), "event".into()])
+    }
+
+    fn resolve_column(&self, _column: &str, _candidates: &[TableRef]) -> Option<TableRef> {
+        None
     }
 }
 
@@ -76,6 +88,68 @@ fn select_star_with_catalog_expands() {
         concrete_sources(find_mapping(&result.columns.mappings, "email")),
         vec![("users".into(), "email".into())]
     );
+}
+
+fn assert_qualified_alias_star_expands(sql: &str) {
+    let result = analyze(
+        sql,
+        AnalyzeOptions {
+            catalog: Some(Box::new(AliasCatalog)),
+            dialect: Dialect::Generic,
+            ..AnalyzeOptions::default()
+        },
+    )
+    .expect("parse")
+    .into_iter()
+    .next()
+    .unwrap();
+
+    assert_eq!(result.columns.mappings.len(), 2);
+    assert!(result.columns.mappings.iter().all(|mapping| {
+        mapping
+            .sources
+            .iter()
+            .all(|source| matches!(source, ColumnOrigin::Concrete { .. }))
+    }));
+    assert_eq!(
+        concrete_sources(find_mapping(&result.columns.mappings, "id")),
+        vec![("actual_table".into(), "id".into())]
+    );
+    assert_eq!(
+        concrete_sources(find_mapping(&result.columns.mappings, "event")),
+        vec![("actual_table".into(), "event".into())]
+    );
+}
+
+#[test]
+fn qualified_alias_star_uses_catalog_table_binding() {
+    for sql in [
+        "SELECT a.* FROM actual_table AS a",
+        "WITH x AS (SELECT a.* FROM actual_table AS a) SELECT * FROM x",
+    ] {
+        assert_qualified_alias_star_expands(sql);
+    }
+}
+
+#[test]
+fn qualified_alias_star_without_catalog_keeps_actual_table_wildcard() {
+    let result = analyze(
+        "SELECT a.* FROM actual_table AS a",
+        AnalyzeOptions {
+            dialect: Dialect::Generic,
+            ..AnalyzeOptions::default()
+        },
+    )
+    .expect("parse")
+    .into_iter()
+    .next()
+    .unwrap();
+
+    assert_eq!(result.columns.mappings.len(), 1);
+    match &result.columns.mappings[0].sources[0] {
+        ColumnOrigin::Wildcard { table } => assert_eq!(table.table, "actual_table"),
+        other => panic!("expected Wildcard, got {other:?}"),
+    }
 }
 
 #[test]

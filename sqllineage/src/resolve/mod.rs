@@ -164,6 +164,9 @@ fn star_arity(
             Some(Binding::Cte(child) | Binding::DerivedTable(child)) => {
                 scope_arity(child, graph, catalog, active)
             }
+            Some(Binding::Table(actual_table)) => Ok(catalog
+                .and_then(|catalog| catalog.list_columns(&actual_table))
+                .map(|columns| columns.len())),
             _ => Ok(catalog
                 .and_then(|catalog| catalog.list_columns(table))
                 .map(|columns| columns.len())),
@@ -534,6 +537,8 @@ fn expand_star(
                 mappings,
                 visited_scopes,
             );
+        } else if let Some(Binding::Table(actual_table)) = binding {
+            mappings.push(wildcard_mapping(None, actual_table));
         } else {
             mappings.push(wildcard_mapping(None, t.clone()));
         }
