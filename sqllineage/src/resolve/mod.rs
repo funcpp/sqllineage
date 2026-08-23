@@ -30,7 +30,10 @@ pub(crate) fn resolve(
         return Ok(AnalyzeResult {
             statement_type,
             tables: graph.tables,
-            columns: ColumnLineage::default(),
+            columns: ColumnLineage {
+                mappings: Vec::new(),
+                has_unresolved_stars: false,
+            },
             warnings,
         });
     }
@@ -43,12 +46,16 @@ pub(crate) fn resolve(
         return Ok(AnalyzeResult {
             statement_type,
             tables: graph.tables,
-            columns: ColumnLineage::default(),
+            columns: ColumnLineage {
+                mappings: Vec::new(),
+                has_unresolved_stars: false,
+            },
             warnings,
         });
     }
 
     validate_set_arities(&graph, catalog)?;
+    let has_unresolved_stars = graph_has_unresolved_stars(&graph, catalog);
 
     let mut incoming: Vec<Vec<usize>> = vec![vec![]; graph.nodes.len()];
     for (idx, edge) in graph.edges.iter().enumerate() {
@@ -83,8 +90,26 @@ pub(crate) fn resolve(
     Ok(AnalyzeResult {
         statement_type,
         tables: graph.tables,
-        columns: ColumnLineage { mappings },
+        columns: ColumnLineage {
+            mappings,
+            has_unresolved_stars,
+        },
         warnings,
+    })
+}
+
+/// Inspect the complete graph rather than only the root projection. A star
+/// under a JOIN/CTE/derived-table boundary is still an unresolved schema
+/// dependency and must be visible to consumers of the public result.
+fn graph_has_unresolved_stars(graph: &RawGraph, catalog: Option<&dyn CatalogProvider>) -> bool {
+    graph.nodes.iter().any(|node| {
+        let RawNode::Star { table, scope } = node else {
+            return false;
+        };
+        matches!(
+            star_arity(table.as_ref(), *scope, graph, catalog, &mut HashSet::new()),
+            Ok(None)
+        )
     })
 }
 
@@ -444,26 +469,42 @@ fn resolve_scope_mappings(
                 // left branch's names and order, as SQL set operations do.
                 let mut merged = Vec::with_capacity(left_mappings.len());
                 for (idx, left_mapping) in left_mappings.into_iter().enumerate() {
-                    let mut sources = left_mapping.sources;
-                    let mut transform = left_mapping.transform.clone();
                     if let Some(right_mapping) = right_mappings.get(idx) {
-                        sources.extend(right_mapping.sources.clone());
-                        transform = merge_transform(&transform, &right_mapping.transform);
-                    }
-                    if recursive {
-                        merged.push(ColumnMapping {
-                            target: left_mapping.target,
-                            sources: vec![ColumnOrigin::Recursive {
-                                base_sources: sources,
-                            }],
-                            transform,
-                        });
+                        let (sources, transform) =
+                            merge_branch_sources(&left_mapping, right_mapping);
+                        if recursive {
+                            merged.push(ColumnMapping {
+                                target: left_mapping.target,
+                                sources: vec![ColumnOrigin::Recursive {
+                                    base_sources: sources,
+                                }],
+                                transform,
+                            });
+                        } else {
+                            merged.push(ColumnMapping {
+                                target: left_mapping.target,
+                                sources,
+                                transform,
+                            });
+                        }
                     } else {
-                        merged.push(ColumnMapping {
-                            target: left_mapping.target,
-                            sources,
-                            transform,
-                        });
+                        let sources = left_mapping.sources;
+                        let transform = left_mapping.transform;
+                        if recursive {
+                            merged.push(ColumnMapping {
+                                target: left_mapping.target,
+                                sources: vec![ColumnOrigin::Recursive {
+                                    base_sources: sources,
+                                }],
+                                transform,
+                            });
+                        } else {
+                            merged.push(ColumnMapping {
+                                target: left_mapping.target,
+                                sources,
+                                transform,
+                            });
+                        }
                     }
                 }
                 merged
@@ -479,13 +520,16 @@ fn resolve_scope_mappings(
 
 fn mappings_have_unknown_shape(mappings: &[ColumnMapping]) -> bool {
     mappings.iter().any(|mapping| {
-        mapping.sources.iter().any(|source| match source {
-            ColumnOrigin::Wildcard { .. } => true,
-            ColumnOrigin::Recursive { base_sources } => base_sources
-                .iter()
-                .any(|source| matches!(source, ColumnOrigin::Wildcard { .. })),
-            _ => false,
-        })
+        // A named output that happens to flow through an unresolved star has
+        // a known ordinal/name and must not act as a variable-width barrier.
+        mapping.target.column == "*"
+            && mapping.sources.iter().any(|source| match source {
+                ColumnOrigin::Wildcard { .. } => true,
+                ColumnOrigin::Recursive { base_sources } => base_sources
+                    .iter()
+                    .any(|source| matches!(source, ColumnOrigin::Wildcard { .. })),
+                _ => false,
+            })
     })
 }
 
@@ -513,12 +557,11 @@ fn merge_unknown_shape_mappings(
     let mut merged = Vec::with_capacity(left.len() + right.len() - prefix_len);
 
     for (left_mapping, right_mapping) in left.iter().zip(right.iter()).take(prefix_len) {
-        let mut sources = left_mapping.sources.clone();
-        sources.extend(right_mapping.sources.clone());
+        let (sources, transform) = merge_branch_sources(left_mapping, right_mapping);
         merged.push(ColumnMapping {
             target: left_mapping.target.clone(),
             sources,
-            transform: merge_transform(&left_mapping.transform, &right_mapping.transform),
+            transform,
         });
     }
     merged.extend(
@@ -533,6 +576,23 @@ fn merge_unknown_shape_mappings(
             .map(|mapping| append_unknown_sources(mapping, &left_unknown)),
     );
     merged
+}
+
+/// Merge two positional branch mappings while retaining the fact that one
+/// branch was source-free. An empty source list is meaningful for literals;
+/// dropping it would overclaim complete lineage from the other branch.
+fn merge_branch_sources(
+    left: &ColumnMapping,
+    right: &ColumnMapping,
+) -> (Vec<ColumnOrigin>, TransformKind) {
+    let mut sources = left.sources.clone();
+    sources.extend(right.sources.clone());
+    if left.sources.is_empty() != right.sources.is_empty() {
+        sources.push(ColumnOrigin::SourceFree {
+            column: left.target.column.clone(),
+        });
+    }
+    (sources, merge_transform(&left.transform, &right.transform))
 }
 
 fn first_unknown_mapping(mappings: &[ColumnMapping]) -> Option<usize> {
@@ -564,6 +624,11 @@ fn append_unknown_sources(
     mut mapping: ColumnMapping,
     unknown_sources: &[ColumnOrigin],
 ) -> ColumnMapping {
+    if mapping.sources.is_empty() && !unknown_sources.is_empty() {
+        mapping.sources.push(ColumnOrigin::SourceFree {
+            column: mapping.target.column.clone(),
+        });
+    }
     mapping.sources.extend(unknown_sources.iter().cloned());
     mapping
 }
@@ -1088,11 +1153,19 @@ fn resolve_named_scope_reference(
         .iter()
         .flat_map(|mapping| mapping.sources.iter())
         .filter_map(|source| match source {
-            ColumnOrigin::Wildcard { .. } => Some(source.clone()),
-            ColumnOrigin::Recursive { base_sources } => base_sources
-                .iter()
-                .find(|source| matches!(source, ColumnOrigin::Wildcard { .. }))
-                .cloned(),
+            ColumnOrigin::Wildcard { table } => Some(ColumnOrigin::NamedWildcard {
+                table: table.clone(),
+                column: name.clone(),
+            }),
+            ColumnOrigin::Recursive { base_sources } => {
+                base_sources.iter().find_map(|source| match source {
+                    ColumnOrigin::Wildcard { table } => Some(ColumnOrigin::NamedWildcard {
+                        table: table.clone(),
+                        column: name.clone(),
+                    }),
+                    _ => None,
+                })
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -1549,11 +1622,19 @@ fn resolve_through_scope(
         .iter()
         .flat_map(|mapping| mapping.sources.iter())
         .find_map(|source| match source {
-            ColumnOrigin::Wildcard { .. } => Some(source.clone()),
-            ColumnOrigin::Recursive { base_sources } => base_sources
-                .iter()
-                .find(|source| matches!(source, ColumnOrigin::Wildcard { .. }))
-                .cloned(),
+            ColumnOrigin::Wildcard { table } => Some(ColumnOrigin::NamedWildcard {
+                table: table.clone(),
+                column: column_name.to_string(),
+            }),
+            ColumnOrigin::Recursive { base_sources } => {
+                base_sources.iter().find_map(|source| match source {
+                    ColumnOrigin::Wildcard { table } => Some(ColumnOrigin::NamedWildcard {
+                        table: table.clone(),
+                        column: column_name.to_string(),
+                    }),
+                    _ => None,
+                })
+            }
             _ => None,
         })
     {

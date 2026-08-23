@@ -104,6 +104,13 @@ pub struct TableLineage {
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct ColumnLineage {
     pub mappings: Vec<ColumnMapping>,
+    /// Whether any `SELECT *` in the statement (including nested CTEs and
+    /// derived tables) could not be expanded with the supplied catalog.
+    ///
+    /// This is deliberately statement-wide: an unresolved star in a JOIN
+    /// branch still makes the statement's schema incomplete even when the
+    /// selected output happens to come from another relation.
+    pub has_unresolved_stars: bool,
 }
 
 /// One output column and the source columns it derives from.
@@ -119,6 +126,7 @@ pub struct ColumnMapping {
 
 /// Resolution state of a source column.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub enum ColumnOrigin {
     /// Fully resolved to a specific table and column.
     Concrete { table: TableRef, column: String },
@@ -132,6 +140,14 @@ pub enum ColumnOrigin {
     },
     /// `SELECT *` or `table.*`; catalog needed to expand.
     Wildcard { table: TableRef },
+    /// A named output was selected through an unexpanded star in a CTE or
+    /// derived table. The table is known, but the physical column cannot be
+    /// asserted to be concrete without schema metadata.
+    NamedWildcard { table: TableRef, column: String },
+    /// One side of a set operation contributes no column source (for example,
+    /// a literal projection). Kept alongside the other branch's origins so a
+    /// consumer cannot mistake partial lineage for complete lineage.
+    SourceFree { column: String },
     /// Derived via recursive CTE; base case sources only.
     Recursive { base_sources: Vec<ColumnOrigin> },
 }
@@ -198,6 +214,7 @@ impl Default for AnalyzeOptions {
 
 /// Supported SQL dialects (maps to sqlparser dialects).
 #[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
 pub enum Dialect {
     #[default]
     Generic,
@@ -208,6 +225,16 @@ pub enum Dialect {
     Databricks,
     Snowflake,
     BigQuery,
+    DuckDb,
+    Redshift,
+    /// Trino syntax is handled by sqlparser's generic dialect because the
+    /// pinned sqlparser release does not expose a dedicated Trino dialect.
+    Trino,
+    Spark,
+    ClickHouse,
+    SQLite,
+    /// Microsoft SQL Server / T-SQL.
+    MsSql,
 }
 
 impl Dialect {

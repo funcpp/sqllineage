@@ -360,10 +360,11 @@ fn non_leading_star_in_right_set_branch_contributes_to_named_output() {
     .unwrap();
 
     assert_eq!(result.columns.mappings.len(), 1);
-    assert_eq!(
-        concrete_sources(&result.columns.mappings[0]),
-        vec![("ext_a".into(), "col_x".into())]
-    );
+    assert!(matches!(
+        result.columns.mappings[0].sources.as_slice(),
+        [ColumnOrigin::Concrete { table, column }, ColumnOrigin::SourceFree { column: marker }]
+            if table.table == "ext_a" && column == "col_x" && marker == "col_a"
+    ));
 }
 
 #[test]
@@ -428,7 +429,8 @@ fn named_lookup_through_unknown_projection_star_is_indeterminate() {
     assert_eq!(result.columns.mappings.len(), 1);
     assert!(matches!(
         result.columns.mappings[0].sources.as_slice(),
-        [ColumnOrigin::Wildcard { table }] if table.table == "unknown"
+        [ColumnOrigin::NamedWildcard { table, column }]
+            if table.table == "unknown" && column == "name"
     ));
 }
 

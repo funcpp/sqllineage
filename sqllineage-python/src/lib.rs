@@ -111,6 +111,15 @@ impl PyColumnOrigin {
                 "ColumnOrigin.wildcard({}.*)",
                 self.table.as_ref().map_or("?", |t| &t.table),
             ),
+            "named_wildcard" => format!(
+                "ColumnOrigin.named_wildcard({}.{})",
+                self.table.as_ref().map_or("?", |t| &t.table),
+                self.column.as_deref().unwrap_or("?"),
+            ),
+            "source_free" => format!(
+                "ColumnOrigin.source_free({})",
+                self.column.as_deref().unwrap_or("?"),
+            ),
             "ambiguous" => format!(
                 "ColumnOrigin.ambiguous({})",
                 self.column.as_deref().unwrap_or("?"),
@@ -144,12 +153,33 @@ fn convert_origin(o: &sqllineage_core::ColumnOrigin) -> PyColumnOrigin {
             candidates: None,
             base_sources: None,
         },
+        sqllineage_core::ColumnOrigin::NamedWildcard { table, column } => PyColumnOrigin {
+            kind: "named_wildcard".into(),
+            table: Some(PyTableRef::from(table)),
+            column: Some(column.clone()),
+            candidates: None,
+            base_sources: None,
+        },
+        sqllineage_core::ColumnOrigin::SourceFree { column } => PyColumnOrigin {
+            kind: "source_free".into(),
+            table: None,
+            column: Some(column.clone()),
+            candidates: None,
+            base_sources: None,
+        },
         sqllineage_core::ColumnOrigin::Recursive { base_sources } => PyColumnOrigin {
             kind: "recursive".into(),
             table: None,
             column: None,
             candidates: None,
             base_sources: Some(base_sources.iter().map(convert_origin).collect()),
+        },
+        _ => PyColumnOrigin {
+            kind: "unknown".into(),
+            table: None,
+            column: None,
+            candidates: None,
+            base_sources: None,
         },
     }
 }
@@ -210,6 +240,8 @@ struct PyLineageResult {
     tables: PyTableLineage,
     #[pyo3(get)]
     columns: Vec<PyColumnMapping>,
+    #[pyo3(get)]
+    has_unresolved_stars: bool,
 }
 
 #[pymethods]
@@ -282,22 +314,15 @@ fn analyze(
     catalog: Option<Py<PyAny>>,
     normalize_case: bool,
 ) -> PyResult<Vec<PyLineageResult>> {
-    let d = match dialect.to_lowercase().as_str() {
-        "generic" => sqllineage_core::Dialect::Generic,
-        "ansi" => sqllineage_core::Dialect::Ansi,
-        "postgresql" | "postgres" => sqllineage_core::Dialect::PostgreSql,
-        "mysql" => sqllineage_core::Dialect::MySql,
-        "hive" => sqllineage_core::Dialect::Hive,
-        "databricks" => sqllineage_core::Dialect::Databricks,
-        "snowflake" => sqllineage_core::Dialect::Snowflake,
-        "bigquery" => sqllineage_core::Dialect::BigQuery,
-        other => {
+    let d = match parse_dialect_name(dialect) {
+        Some(dialect) => dialect,
+        None => {
+            let normalized = dialect.to_lowercase();
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "unknown dialect: '{other}'"
+                "unknown dialect: '{normalized}'"
             )));
         }
     };
-
     let catalog_box: Option<Box<dyn sqllineage_core::CatalogProvider>> =
         catalog.map(|obj| Box::new(PyCatalog { obj }) as Box<dyn sqllineage_core::CatalogProvider>);
 
@@ -329,8 +354,56 @@ fn analyze(
                     transform: convert_transform(&m.transform).into(),
                 })
                 .collect(),
+            has_unresolved_stars: result.columns.has_unresolved_stars,
         })
         .collect())
+}
+
+fn parse_dialect_name(name: &str) -> Option<sqllineage_core::Dialect> {
+    match name.to_lowercase().as_str() {
+        "generic" => Some(sqllineage_core::Dialect::Generic),
+        "ansi" => Some(sqllineage_core::Dialect::Ansi),
+        "postgresql" | "postgres" => Some(sqllineage_core::Dialect::PostgreSql),
+        "mysql" => Some(sqllineage_core::Dialect::MySql),
+        "hive" => Some(sqllineage_core::Dialect::Hive),
+        "databricks" => Some(sqllineage_core::Dialect::Databricks),
+        "snowflake" => Some(sqllineage_core::Dialect::Snowflake),
+        "bigquery" => Some(sqllineage_core::Dialect::BigQuery),
+        "duckdb" | "duck_db" => Some(sqllineage_core::Dialect::DuckDb),
+        "redshift" => Some(sqllineage_core::Dialect::Redshift),
+        "trino" => Some(sqllineage_core::Dialect::Trino),
+        "spark" | "spark2" | "sparksql" => Some(sqllineage_core::Dialect::Spark),
+        "clickhouse" | "click_house" => Some(sqllineage_core::Dialect::ClickHouse),
+        "sqlite" => Some(sqllineage_core::Dialect::SQLite),
+        "mssql" | "ms_sql" | "tsql" | "t-sql" | "sqlserver" => {
+            Some(sqllineage_core::Dialect::MsSql)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_dialect_name;
+    use sqllineage_core::Dialect;
+
+    #[test]
+    fn parses_added_dialect_names_and_tsql_aliases() {
+        for (name, expected) in [
+            ("duckdb", Dialect::DuckDb),
+            ("redshift", Dialect::Redshift),
+            ("trino", Dialect::Trino),
+            ("spark", Dialect::Spark),
+            ("clickhouse", Dialect::ClickHouse),
+            ("sqlite", Dialect::SQLite),
+            ("tsql", Dialect::MsSql),
+        ] {
+            assert!(
+                matches!(parse_dialect_name(name), Some(actual) if std::mem::discriminant(&actual) == std::mem::discriminant(&expected))
+            );
+        }
+        assert!(parse_dialect_name("not-a-dialect").is_none());
+    }
 }
 
 #[pymodule]
