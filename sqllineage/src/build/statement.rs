@@ -134,7 +134,8 @@ impl LineageBuilder {
                                             .unwrap_or_else(|| format!("col{i}"));
                                         let ancestors = self.collect_ancestors(expr);
                                         let kind = determine_edge_kind(expr);
-                                        let output = self.graph.add_output(col_name.clone(), kind.clone());
+                                        let output =
+                                            self.graph.add_output(col_name.clone(), kind.clone());
                                         for &anc in &ancestors {
                                             self.graph.add_edge(anc, output, kind.clone());
                                         }
