@@ -333,6 +333,22 @@ fn nested_unknown_set_keeps_every_branch_mapping() {
 }
 
 #[test]
+fn leading_unknown_star_hides_nonleading_only_set_names() {
+    let result = analyze_one(
+        "SELECT * FROM unknown_source \
+         UNION ALL SELECT id, amt AS total FROM known_table \
+         UNION ALL SELECT id, fee FROM third_table",
+    );
+    let names = result
+        .columns
+        .mappings
+        .iter()
+        .map(|mapping| mapping.target.column.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["*", "id", "total"]);
+}
+
+#[test]
 fn exact_set_arity_mismatch_is_an_analysis_error() {
     let result = sqllineage::analyze(
         "SELECT a FROM t1 UNION ALL SELECT b, c FROM t2",

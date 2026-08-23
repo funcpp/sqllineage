@@ -343,6 +343,18 @@ fn merge_unknown_shape_mappings(
 ) -> Vec<ColumnMapping> {
     let left_barrier = first_unknown_mapping(&left).unwrap_or(left.len());
     let right_barrier = first_unknown_mapping(&right).unwrap_or(right.len());
+
+    // A leading unknown star determines the output names for the set
+    // operation. When the left side is already a merged set (and therefore
+    // contains named slots contributed by an earlier operand), a right-only
+    // tail would publish names that the leading operand never declared. Keep
+    // the left candidates and their existing wildcard provenance; a direct
+    // two-branch `SELECT * UNION SELECT a, b` still retains the right branch
+    // names because there are no prior named slots to preserve.
+    if left_barrier == 0 && left.len() > 1 && right_barrier == right.len() {
+        return left;
+    }
+
     let prefix_len = left_barrier.min(right_barrier);
     let left_unknown = wildcard_sources(&left);
     let right_unknown = wildcard_sources(&right);
