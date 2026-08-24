@@ -1,5 +1,5 @@
 use sqlparser::ast::{
-    Expr, Ident, Select, SelectItem, SelectItemQualifiedWildcardKind, TableFactor, TableWithJoins,
+    Expr, Select, SelectItem, SelectItemQualifiedWildcardKind, TableFactor, TableWithJoins,
 };
 
 use crate::build::LineageBuilder;
@@ -252,16 +252,4 @@ fn infer_column_name(expr: &Expr) -> String {
         Expr::Cast { expr, .. } | Expr::Nested(expr) => infer_column_name(expr),
         _ => "?column?".to_string(),
     }
-}
-
-/// Split a compound identifier into (qualifier, `column_name`).
-pub(crate) fn split_compound(parts: &[Ident]) -> (String, String) {
-    let len = parts.len();
-    let column = parts[len - 1].value.clone();
-    let qualifier = parts[..len - 1]
-        .iter()
-        .map(|p| p.value.as_str())
-        .collect::<Vec<_>>()
-        .join(".");
-    (qualifier, column)
 }

@@ -210,6 +210,19 @@ pub enum Dialect {
     BigQuery,
 }
 
+impl Dialect {
+    /// Whether an unqualified relation alias can denote the complete row.
+    ///
+    /// `BigQuery` and PostgreSQL permit expressions such as `ARRAY_AGG(t)` when
+    /// `t` is a range-variable alias.  Such an expression is a row/record
+    /// value, not a physical column named after the alias.  The lineage API
+    /// has no whole-row origin, so callers must retain honest uncertainty
+    /// instead of fabricating a concrete `table.alias` source.
+    pub(crate) const fn supports_relation_alias_row_value(self) -> bool {
+        matches!(self, Self::BigQuery | Self::PostgreSql)
+    }
+}
+
 /// Error returned when SQL parsing or semantic validation fails.
 #[derive(Debug, Clone)]
 pub struct ParseError {

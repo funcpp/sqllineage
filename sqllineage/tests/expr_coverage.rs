@@ -1,7 +1,9 @@
 mod common;
 
 use common::{analyze_one, concrete_sources, find_mapping};
-use sqllineage::{AnalyzeOptions, Dialect, TransformKind, analyze};
+use sqllineage::{
+    AnalyzeOptions, CatalogProvider, ColumnOrigin, Dialect, TableRef, TransformKind, analyze,
+};
 
 fn analyze_with_dialect(sql: &str, dialect: Dialect) -> sqllineage::AnalyzeResult {
     analyze(
@@ -184,5 +186,250 @@ fn bigquery_offset_compound_field_access_uses_binding_column() {
     assert_eq!(
         concrete_sources(m),
         vec![("actual_table".into(), "items_array".into())]
+    );
+}
+
+#[test]
+fn qualified_struct_field_access_uses_binding_column() {
+    let result = analyze_with_dialect(
+        "SELECT agg.event.qualified_field AS field FROM upstream_model AS agg",
+        Dialect::BigQuery,
+    );
+    let m = find_mapping(&result.columns.mappings, "field");
+    assert_eq!(
+        concrete_sources(m),
+        vec![("upstream_model".into(), "event".into())]
+    );
+}
+
+#[test]
+fn unqualified_struct_field_access_uses_top_level_column() {
+    let result = analyze_with_dialect(
+        "SELECT event.bare_field AS field FROM upstream_model",
+        Dialect::BigQuery,
+    );
+    let m = find_mapping(&result.columns.mappings, "field");
+    assert_eq!(
+        concrete_sources(m),
+        vec![("upstream_model".into(), "event".into())]
+    );
+}
+
+#[test]
+fn cte_struct_field_access_uses_cte_binding_column() {
+    let result = analyze_one(
+        "WITH upstream AS (SELECT event FROM source) SELECT upstream.event.field AS value FROM upstream",
+    );
+    let m = find_mapping(&result.columns.mappings, "value");
+    assert_eq!(concrete_sources(m), vec![("source".into(), "event".into())]);
+}
+
+#[test]
+fn derived_struct_field_access_uses_derived_binding_column() {
+    let result = analyze_one(
+        "SELECT derived.event.field AS value FROM (SELECT event FROM source) AS derived",
+    );
+    let m = find_mapping(&result.columns.mappings, "value");
+    assert_eq!(concrete_sources(m), vec![("source".into(), "event".into())]);
+}
+
+#[test]
+fn physical_relation_prefix_struct_field_access_uses_table_parts() {
+    let result =
+        analyze_one("SELECT catalog.schema.source.event.field AS value FROM catalog.schema.source");
+    let m = find_mapping(&result.columns.mappings, "value");
+    assert_eq!(concrete_sources(m), vec![("source".into(), "event".into())]);
+    assert_eq!(result.tables.inputs[0].catalog.as_deref(), Some("catalog"));
+    assert_eq!(result.tables.inputs[0].schema.as_deref(), Some("schema"));
+    match m.sources.as_slice() {
+        [ColumnOrigin::Concrete { table, column }] => {
+            assert_eq!(table.catalog.as_deref(), Some("catalog"));
+            assert_eq!(table.schema.as_deref(), Some("schema"));
+            assert_eq!(table.table, "source");
+            assert_eq!(column, "event");
+        }
+        other => panic!("expected concrete physical relation source, got {other:?}"),
+    }
+}
+
+#[test]
+fn quoted_single_component_relation_name_keeps_embedded_dot() {
+    let result = analyze_with_dialect(
+        "SELECT \"orders.v2\".payload.field AS value FROM \"orders.v2\"",
+        Dialect::PostgreSql,
+    );
+    let m = find_mapping(&result.columns.mappings, "value");
+    match m.sources.as_slice() {
+        [ColumnOrigin::Concrete { table, column }] => {
+            assert_eq!(table.catalog, None);
+            assert_eq!(table.schema, None);
+            assert_eq!(table.table, "orders.v2");
+            assert_eq!(column, "payload");
+        }
+        other => panic!("expected quoted relation source, got {other:?}"),
+    }
+}
+
+#[test]
+fn qualified_struct_field_access_keeps_normal_alias_column_resolution() {
+    let result = analyze_one("SELECT source.user_id AS value FROM source");
+    let m = find_mapping(&result.columns.mappings, "value");
+    assert_eq!(
+        concrete_sources(m),
+        vec![("source".into(), "user_id".into())]
+    );
+}
+
+#[test]
+fn unqualified_struct_field_access_keeps_binding_ambiguity() {
+    let result = analyze_one(
+        "SELECT event.field AS value FROM first_source JOIN second_source ON first_source.id = second_source.id",
+    );
+    let m = find_mapping(&result.columns.mappings, "value");
+    assert!(matches!(
+        m.sources.as_slice(),
+        [ColumnOrigin::Ambiguous { column, candidates }] if column == "event" && candidates.len() == 2
+    ));
+}
+
+struct UnqualifiedStructCatalog;
+
+impl CatalogProvider for UnqualifiedStructCatalog {
+    fn list_columns(&self, table: &TableRef) -> Option<Vec<String>> {
+        match table.table.as_str() {
+            "first_source" => Some(vec!["event".into()]),
+            "second_source" => Some(vec!["other".into()]),
+            _ => None,
+        }
+    }
+
+    fn resolve_column(&self, column: &str, candidates: &[TableRef]) -> Option<TableRef> {
+        (column == "event")
+            .then(|| {
+                candidates
+                    .iter()
+                    .find(|table| table.table == "first_source")
+                    .cloned()
+            })
+            .flatten()
+    }
+}
+
+#[test]
+fn unqualified_struct_field_access_uses_catalog_owner_for_ambiguous_root() {
+    let result = analyze(
+        "SELECT event.field AS value FROM first_source JOIN second_source ON first_source.id = second_source.id",
+        AnalyzeOptions {
+            dialect: Dialect::BigQuery,
+            catalog: Some(Box::new(UnqualifiedStructCatalog)),
+            ..AnalyzeOptions::default()
+        },
+    )
+    .expect("SQL should parse")
+    .remove(0);
+    let m = find_mapping(&result.columns.mappings, "value");
+    match m.sources.as_slice() {
+        [ColumnOrigin::Concrete { table, column }] => {
+            assert_eq!(table.table, "first_source");
+            assert_eq!(column, "event");
+        }
+        other => panic!("expected catalog-resolved source, got {other:?}"),
+    }
+}
+
+struct RowValueCatalog;
+
+impl CatalogProvider for RowValueCatalog {
+    fn list_columns(&self, table: &TableRef) -> Option<Vec<String>> {
+        (table.table == "source_table").then(|| vec!["source".into()])
+    }
+
+    fn resolve_column(&self, column: &str, candidates: &[TableRef]) -> Option<TableRef> {
+        (column == "source")
+            .then(|| candidates.first().cloned())
+            .flatten()
+    }
+}
+
+#[test]
+fn bigquery_row_value_alias_prefers_catalog_column_with_same_name() {
+    let result = analyze(
+        "SELECT ARRAY_AGG(source) AS event FROM source_table AS source",
+        AnalyzeOptions {
+            dialect: Dialect::BigQuery,
+            catalog: Some(Box::new(RowValueCatalog)),
+            ..AnalyzeOptions::default()
+        },
+    )
+    .expect("SQL should parse")
+    .remove(0);
+    let m = find_mapping(&result.columns.mappings, "event");
+    assert_eq!(
+        concrete_sources(m),
+        vec![("source_table".into(), "source".into())]
+    );
+}
+
+#[test]
+fn bigquery_row_value_alias_prefers_cte_output_column_with_same_name() {
+    let result = analyze_with_dialect(
+        "WITH source AS (SELECT source_table AS source FROM base) SELECT ARRAY_AGG(source) AS event FROM source",
+        Dialect::BigQuery,
+    );
+    let m = find_mapping(&result.columns.mappings, "event");
+    assert_eq!(
+        concrete_sources(m),
+        vec![("base".into(), "source_table".into())]
+    );
+}
+
+#[test]
+fn bigquery_row_value_alias_prefers_derived_output_column_with_same_name() {
+    let result = analyze_with_dialect(
+        "SELECT ARRAY_AGG(source) AS event FROM (SELECT source_table AS source FROM base) AS source",
+        Dialect::BigQuery,
+    );
+    let m = find_mapping(&result.columns.mappings, "event");
+    assert_eq!(
+        concrete_sources(m),
+        vec![("base".into(), "source_table".into())]
+    );
+}
+
+#[test]
+fn bigquery_row_value_relation_alias_is_not_a_column() {
+    let result = analyze_with_dialect(
+        "SELECT ARRAY_AGG(source) AS event FROM source_table AS source",
+        Dialect::BigQuery,
+    );
+    let m = find_mapping(&result.columns.mappings, "event");
+    assert!(matches!(
+        m.sources.as_slice(),
+        [ColumnOrigin::Ambiguous { column, candidates }]
+            if column == "source" && candidates.is_empty()
+    ));
+}
+
+#[test]
+fn postgresql_row_value_relation_alias_is_not_a_column() {
+    let result = analyze_with_dialect(
+        "SELECT ARRAY_AGG(source) AS event FROM source_table AS source",
+        Dialect::PostgreSql,
+    );
+    let m = find_mapping(&result.columns.mappings, "event");
+    assert!(matches!(
+        m.sources.as_slice(),
+        [ColumnOrigin::Ambiguous { column, candidates }]
+            if column == "source" && candidates.is_empty()
+    ));
+}
+
+#[test]
+fn generic_row_value_relation_alias_preserves_existing_behavior() {
+    let result = analyze_one("SELECT ARRAY_AGG(source) AS event FROM source_table AS source");
+    let m = find_mapping(&result.columns.mappings, "event");
+    assert_eq!(
+        concrete_sources(m),
+        vec![("source_table".into(), "source".into())]
     );
 }

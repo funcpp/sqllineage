@@ -73,7 +73,7 @@ pub fn analyze(sql: &str, opts: AnalyzeOptions) -> Result<Vec<AnalyzeResult>, Pa
     statements
         .iter()
         .map(|stmt| {
-            let builder = build::LineageBuilder::new(opts.normalize_case);
+            let builder = build::LineageBuilder::new(opts.normalize_case, opts.dialect);
             let (raw_graph, warnings, statement_type) = builder.build(stmt);
             resolve::resolve(raw_graph, catalog.as_deref(), warnings, statement_type)
         })

@@ -39,4 +39,13 @@ pub(crate) enum RawNode {
         /// when a later range variable shadows its name.
         binding: Option<Binding>,
     },
+    /// A relation alias used where the dialect permits a whole-row value.
+    /// Resolution must distinguish this from a source-free expression: a
+    /// catalog or derived scope can still prove that the alias is an ordinary
+    /// physical/output column with the same name.
+    RowValueCandidate {
+        name: String,
+        scope: ScopeId,
+        binding: Option<Binding>,
+    },
 }

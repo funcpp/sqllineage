@@ -1,10 +1,10 @@
 use sqlparser::ast::{self, AccessExpr, Expr, FunctionArguments, Subscript, WindowType};
 
 use crate::build::LineageBuilder;
-use crate::build::select::split_compound;
 use crate::graph::edge::EdgeKind;
 use crate::graph::node::NodeId;
 use crate::graph::scope::{Binding, ScopeKind};
+use crate::types::TableRef;
 
 impl LineageBuilder {
     pub(crate) fn collect_ancestors(&mut self, expr: &Expr) -> Vec<NodeId> {
@@ -15,6 +15,19 @@ impl LineageBuilder {
                     .scopes
                     .lookup(self.current_scope, &ident.value)
                     .cloned();
+                if binding.as_ref().is_some_and(|binding| {
+                    self.dialect.supports_relation_alias_row_value()
+                        && matches!(
+                            binding,
+                            Binding::Table(_) | Binding::Cte(_) | Binding::DerivedTable(_)
+                        )
+                }) {
+                    return vec![self.graph.add_row_value_candidate(
+                        ident.value.clone(),
+                        self.current_scope,
+                        binding,
+                    )];
+                }
                 let binding =
                     binding.filter(|binding| matches!(binding, Binding::VirtualSource(_)));
                 let node = self.graph.add_unqualified_with_binding(
@@ -25,21 +38,7 @@ impl LineageBuilder {
                 vec![node]
             }
 
-            Expr::CompoundIdentifier(parts) => {
-                let (qualifier, column) = split_compound(parts);
-                let binding = self
-                    .graph
-                    .scopes
-                    .lookup(self.current_scope, &qualifier)
-                    .cloned();
-                let node = self.graph.add_ref_with_binding(
-                    column,
-                    Some(qualifier),
-                    self.current_scope,
-                    binding,
-                );
-                vec![node]
-            }
+            Expr::CompoundIdentifier(parts) => self.collect_compound_identifier_ancestors(parts),
 
             Expr::Value(_)
             | Expr::TypedString { .. }
@@ -345,13 +344,11 @@ impl LineageBuilder {
                     .scopes
                     .lookup(self.current_scope, &binding_name.value)
                     .cloned();
-                let node = self.graph.add_ref_with_binding(
+                vec![self.add_bound_field_ancestor(
+                    binding_name.value.clone(),
                     field.value.clone(),
-                    Some(binding_name.value.clone()),
-                    self.current_scope,
                     binding,
-                );
-                vec![node]
+                )]
             }
             (Expr::Identifier(column), Some(AccessExpr::Dot(Expr::Identifier(_)))) => {
                 let binding = self
@@ -378,6 +375,82 @@ impl LineageBuilder {
         ancestors
     }
 
+    /// Resolve a plain dotted identifier by separating its relation binding
+    /// from the top-level physical column.  The parser represents both
+    /// `alias.column` and `alias.struct.field` as a flat compound identifier,
+    /// so rendering all but the final component as one qualifier loses the
+    /// distinction between a relation name and a nested field path.
+    fn collect_compound_identifier_ancestors(
+        &mut self,
+        parts: &[sqlparser::ast::Ident],
+    ) -> Vec<NodeId> {
+        if let Some((prefix_len, binding)) = self.find_compound_binding(parts) {
+            let qualifier = parts[..prefix_len]
+                .iter()
+                .map(|part| part.value.as_str())
+                .collect::<Vec<_>>()
+                .join(".");
+            let column = parts[prefix_len].value.clone();
+            return vec![self.add_bound_field_ancestor(qualifier, column, Some(binding))];
+        }
+
+        // No relation prefix was found: `struct.field` is an unqualified
+        // top-level column followed by a nested field path.  Only the
+        // top-level column can be represented by the public ColumnOrigin API.
+        let column = parts[0].value.clone();
+        let binding = self
+            .graph
+            .scopes
+            .lookup(self.current_scope, &column)
+            .cloned()
+            .filter(|binding| matches!(binding, Binding::VirtualSource(_)));
+        vec![
+            self.graph
+                .add_unqualified_with_binding(column, self.current_scope, binding),
+        ]
+    }
+
+    /// Find the longest visible relation prefix in a compound identifier.
+    ///
+    /// A one-component prefix is a SQL alias.  Longer prefixes are matched
+    /// against the physical parts of a table binding, allowing references such
+    /// as `catalog.schema.table.column` without turning the relation into a
+    /// single quoted string containing dots.
+    fn find_compound_binding(&self, parts: &[sqlparser::ast::Ident]) -> Option<(usize, Binding)> {
+        let visible = self.graph.scopes.visible_bindings(self.current_scope);
+        (1..parts.len()).rev().find_map(|prefix_len| {
+            let prefix = parts[..prefix_len]
+                .iter()
+                .map(|part| part.value.as_str())
+                .collect::<Vec<_>>();
+
+            // Aliases are single identifiers and therefore only match the
+            // first component of a compound identifier.
+            if prefix_len == 1
+                && let Some((_, binding)) = visible.iter().find(|(name, _)| name == prefix[0])
+            {
+                return Some((prefix_len, binding.clone()));
+            }
+
+            visible.iter().find_map(|(_, binding)| {
+                let Binding::Table(table) = binding else {
+                    return None;
+                };
+                (table_parts(table) == prefix).then(|| (prefix_len, binding.clone()))
+            })
+        })
+    }
+
+    fn add_bound_field_ancestor(
+        &mut self,
+        qualifier: String,
+        column: String,
+        binding: Option<Binding>,
+    ) -> NodeId {
+        self.graph
+            .add_ref_with_binding(column, Some(qualifier), self.current_scope, binding)
+    }
+
     fn collect_subscript_ancestors(&mut self, subscript: &Subscript) -> Vec<NodeId> {
         match subscript {
             Subscript::Index { index } => self.collect_ancestors(index),
@@ -400,6 +473,18 @@ impl LineageBuilder {
             }
         }
     }
+}
+
+fn table_parts(table: &TableRef) -> Vec<&str> {
+    let mut parts = Vec::with_capacity(3);
+    if let Some(catalog) = &table.catalog {
+        parts.push(catalog.as_str());
+    }
+    if let Some(schema) = &table.schema {
+        parts.push(schema.as_str());
+    }
+    parts.push(table.table.as_str());
+    parts
 }
 
 pub(crate) fn determine_edge_kind(expr: &Expr) -> EdgeKind {

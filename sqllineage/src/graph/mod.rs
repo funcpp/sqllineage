@@ -66,6 +66,19 @@ impl RawGraph {
         })
     }
 
+    pub fn add_row_value_candidate(
+        &mut self,
+        name: String,
+        scope: ScopeId,
+        binding: Option<crate::graph::scope::Binding>,
+    ) -> NodeId {
+        self.add_node(RawNode::RowValueCandidate {
+            name,
+            scope,
+            binding,
+        })
+    }
+
     pub fn add_star(&mut self, table: Option<TableRef>, scope: ScopeId) -> NodeId {
         self.add_node(RawNode::Star { table, scope })
     }

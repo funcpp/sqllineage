@@ -1205,6 +1205,22 @@ fn resolve_node(
             }
         }
 
+        RawNode::RowValueCandidate {
+            name,
+            scope,
+            binding,
+        } => resolve_row_value_candidate(
+            name,
+            *scope,
+            binding.clone(),
+            graph,
+            resolved,
+            incoming,
+            visited,
+            catalog,
+            mapping_cache,
+        ),
+
         RawNode::Star { table, .. } => table
             .as_ref()
             .map(|t| ColumnOrigin::Wildcard { table: t.clone() }),
@@ -1214,6 +1230,73 @@ fn resolve_node(
 
     resolved[node_id].clone_from(&origin);
     origin
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_row_value_candidate(
+    name: &str,
+    scope: usize,
+    binding: Option<Binding>,
+    graph: &RawGraph,
+    resolved: &mut Vec<Option<ColumnOrigin>>,
+    incoming: &[Vec<usize>],
+    visited: &mut HashSet<NodeId>,
+    catalog: Option<&dyn CatalogProvider>,
+    mapping_cache: &mut ScopeMappingCache,
+) -> Option<ColumnOrigin> {
+    let binding = binding.or_else(|| graph.scopes.lookup(scope, name).cloned());
+    let Some(binding) = binding else {
+        return Some(ColumnOrigin::Ambiguous {
+            column: name.to_string(),
+            candidates: Vec::new(),
+        });
+    };
+
+    match binding {
+        Binding::Table(table) => {
+            if let Some(owner) = catalog
+                .and_then(|catalog| catalog.resolve_column(name, std::slice::from_ref(&table)))
+            {
+                Some(ColumnOrigin::Concrete {
+                    table: owner,
+                    column: name.to_string(),
+                })
+            } else {
+                Some(ColumnOrigin::Ambiguous {
+                    column: name.to_string(),
+                    candidates: Vec::new(),
+                })
+            }
+        }
+        Binding::Cte(target_scope) | Binding::DerivedTable(target_scope) => {
+            let is_named_column = graph
+                .scopes
+                .output_columns(target_scope)
+                .iter()
+                .any(|column| column.name == name);
+            if is_named_column {
+                resolve_through_scope(
+                    name,
+                    target_scope,
+                    graph,
+                    resolved,
+                    incoming,
+                    visited,
+                    catalog,
+                    mapping_cache,
+                )
+            } else {
+                Some(ColumnOrigin::Ambiguous {
+                    column: name.to_string(),
+                    candidates: Vec::new(),
+                })
+            }
+        }
+        Binding::VirtualSource(_) => Some(ColumnOrigin::Ambiguous {
+            column: name.to_string(),
+            candidates: Vec::new(),
+        }),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
