@@ -394,6 +394,50 @@ impl LineageBuilder {
             return vec![self.add_bound_field_ancestor(qualifier, column, Some(binding))];
         }
 
+        // With no visible relation bindings, preserve the traditional
+        // qualified-reference fallback.  This is used by callers that feed
+        // already-qualified expressions without a FROM clause (for example
+        // `orders.id`): the qualifier is still a physical relation name,
+        // rather than an unqualified struct root.
+        if self
+            .graph
+            .scopes
+            .visible_bindings(self.current_scope)
+            .is_empty()
+            && parts.len() >= 2
+        {
+            let relation_parts = &parts[..parts.len() - 1];
+            let qualifier = parts[..parts.len() - 1]
+                .iter()
+                .map(|part| part.value.as_str())
+                .collect::<Vec<_>>()
+                .join(".");
+            let binding = match relation_parts {
+                [table] => Some(Binding::Table(TableRef::new(table.value.clone()))),
+                [schema, table] => Some(Binding::Table(TableRef::with_schema(
+                    schema.value.clone(),
+                    table.value.clone(),
+                ))),
+                [catalog, schema, table] => Some(Binding::Table(TableRef {
+                    catalog: Some(catalog.value.clone()),
+                    schema: Some(schema.value.clone()),
+                    table: table.value.clone(),
+                })),
+                // Keep the legacy display-only fallback for an unsupported
+                // number of relation components.  Standard SQL relation
+                // names are at most catalog.schema.table, and this branch
+                // avoids inventing a lossy structured interpretation beyond
+                // that shape.
+                _ => None,
+            };
+            return vec![self.graph.add_ref_with_binding(
+                parts[parts.len() - 1].value.clone(),
+                Some(qualifier),
+                self.current_scope,
+                binding,
+            )];
+        }
+
         // No relation prefix was found: `struct.field` is an unqualified
         // top-level column followed by a nested field path.  Only the
         // top-level column can be represented by the public ColumnOrigin API.

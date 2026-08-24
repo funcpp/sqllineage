@@ -177,6 +177,51 @@ fn unqualified_compound_field_access_uses_top_level_column() {
 }
 
 #[test]
+fn compound_identifier_without_visible_binding_keeps_qualified_relation_fallback() {
+    let result = analyze_one("SELECT orders.id AS id");
+    let m = find_mapping(&result.columns.mappings, "id");
+    match m.sources.as_slice() {
+        [ColumnOrigin::Concrete { table, column }] => {
+            assert_eq!(table.catalog, None);
+            assert_eq!(table.schema, None);
+            assert_eq!(table.table, "orders");
+            assert_eq!(column, "id");
+        }
+        other => panic!("expected structured orders.id source, got {other:?}"),
+    }
+}
+
+#[test]
+fn compound_identifier_without_visible_binding_preserves_relation_parts() {
+    for (sql, catalog, schema, table) in [
+        ("SELECT raw.orders.id AS id", None, Some("raw"), "orders"),
+        (
+            "SELECT warehouse.raw.orders.id AS id",
+            Some("warehouse"),
+            Some("raw"),
+            "orders",
+        ),
+    ] {
+        let result = analyze_one(sql);
+        let m = find_mapping(&result.columns.mappings, "id");
+        match m.sources.as_slice() {
+            [
+                ColumnOrigin::Concrete {
+                    table: source_table,
+                    column,
+                },
+            ] => {
+                assert_eq!(source_table.catalog.as_deref(), catalog);
+                assert_eq!(source_table.schema.as_deref(), schema);
+                assert_eq!(source_table.table, table);
+                assert_eq!(column, "id");
+            }
+            other => panic!("expected structured relation source, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn bigquery_offset_compound_field_access_uses_binding_column() {
     let result = analyze_with_dialect(
         "SELECT base.items_array[OFFSET(0)] AS item FROM actual_table AS base",
