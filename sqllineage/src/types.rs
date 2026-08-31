@@ -122,7 +122,10 @@ pub struct ColumnMapping {
 pub enum ColumnOrigin {
     /// Fully resolved to a specific table and column.
     Concrete { table: TableRef, column: String },
-    /// Multiple candidate tables; catalog needed to disambiguate.
+    /// Multiple candidate tables. A non-empty `candidates` list means genuine
+    /// ambiguity between known tables and can be disambiguated by a catalog.
+    /// An empty list means the column could not be resolved to any known table;
+    /// catalog refinement is not attempted.
     Ambiguous {
         column: String,
         candidates: Vec<TableRef>,
@@ -225,6 +228,7 @@ impl std::error::Error for ParseError {}
 pub trait CatalogProvider {
     /// Return the column names of a table. Used to expand `SELECT *`.
     fn list_columns(&self, table: &TableRef) -> Option<Vec<String>>;
-    /// Given a column name and candidate tables, return the owning table.
+    /// Given a column name and candidate tables, return the owning table. This
+    /// is only called with a non-empty candidate slice.
     fn resolve_column(&self, column: &str, candidates: &[TableRef]) -> Option<TableRef>;
 }
