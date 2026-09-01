@@ -3,9 +3,8 @@ pub(crate) mod node;
 pub(crate) mod scope;
 
 use crate::types::TableLineage;
-use crate::types::TableRef;
 use edge::{EdgeKind, RawEdge};
-use node::{NodeId, RawNode};
+use node::{NodeId, RawNode, StarBase, StarOptions};
 use scope::{ScopeId, ScopeTree};
 
 pub(crate) struct RawGraph {
@@ -31,24 +30,60 @@ impl RawGraph {
         id
     }
 
-    pub fn add_output(&mut self, name: String) -> NodeId {
-        self.add_node(RawNode::Output { name })
+    pub fn add_output(&mut self, name: String, intrinsic_kind: EdgeKind) -> NodeId {
+        self.add_node(RawNode::Output {
+            name,
+            intrinsic_kind,
+        })
     }
 
-    pub fn add_ref(&mut self, name: String, qualifier: Option<String>, scope: ScopeId) -> NodeId {
+    pub fn add_ref_with_binding(
+        &mut self,
+        name: String,
+        qualifier: Option<String>,
+        scope: ScopeId,
+        binding: Option<crate::graph::scope::Binding>,
+    ) -> NodeId {
         self.add_node(RawNode::Ref {
             name,
             qualifier,
             scope,
+            binding,
         })
     }
 
-    pub fn add_unqualified(&mut self, name: String, scope: ScopeId) -> NodeId {
-        self.add_node(RawNode::Unqualified { name, scope })
+    pub fn add_unqualified_with_binding(
+        &mut self,
+        name: String,
+        scope: ScopeId,
+        binding: Option<crate::graph::scope::Binding>,
+    ) -> NodeId {
+        self.add_node(RawNode::Unqualified {
+            name,
+            scope,
+            binding,
+        })
     }
 
-    pub fn add_star(&mut self, table: Option<TableRef>, scope: ScopeId) -> NodeId {
-        self.add_node(RawNode::Star { table, scope })
+    pub fn add_row_value_candidate(
+        &mut self,
+        name: String,
+        scope: ScopeId,
+        binding: Option<crate::graph::scope::Binding>,
+    ) -> NodeId {
+        self.add_node(RawNode::RowValueCandidate {
+            name,
+            scope,
+            binding,
+        })
+    }
+
+    pub fn add_star(&mut self, base: StarBase, options: StarOptions, scope: ScopeId) -> NodeId {
+        self.add_node(RawNode::Star {
+            base,
+            options,
+            scope,
+        })
     }
 
     pub fn add_edge(&mut self, from: NodeId, to: NodeId, kind: EdgeKind) {

@@ -50,7 +50,7 @@ impl LineageBuilder {
                     let col_name = assignment_target_name(&assignment.target);
                     let ancestors = self.collect_ancestors(&assignment.value);
                     let kind = determine_edge_kind(&assignment.value);
-                    let output = self.graph.add_output(col_name.clone());
+                    let output = self.graph.add_output(col_name.clone(), kind.clone());
                     for &anc in &ancestors {
                         self.graph.add_edge(anc, output, kind.clone());
                     }
@@ -101,7 +101,7 @@ impl LineageBuilder {
                                 let col_name = assignment_target_name(&assignment.target);
                                 let ancestors = self.collect_ancestors(&assignment.value);
                                 let kind = determine_edge_kind(&assignment.value);
-                                let output = self.graph.add_output(col_name.clone());
+                                let output = self.graph.add_output(col_name.clone(), kind.clone());
                                 for &anc in &ancestors {
                                     self.graph.add_edge(anc, output, kind.clone());
                                 }
@@ -134,7 +134,8 @@ impl LineageBuilder {
                                             .unwrap_or_else(|| format!("col{i}"));
                                         let ancestors = self.collect_ancestors(expr);
                                         let kind = determine_edge_kind(expr);
-                                        let output = self.graph.add_output(col_name.clone());
+                                        let output =
+                                            self.graph.add_output(col_name.clone(), kind.clone());
                                         for &anc in &ancestors {
                                             self.graph.add_edge(anc, output, kind.clone());
                                         }
@@ -280,7 +281,7 @@ impl LineageBuilder {
             | Statement::UNCache { .. }
             | Statement::UNLISTEN { .. }
             | Statement::Unload { .. }
-            | Statement::UnlockTables { .. }
+            | Statement::UnlockTables
             | Statement::Use(_)
             | Statement::Vacuum { .. }
             | Statement::WaitFor { .. }
@@ -371,7 +372,7 @@ impl LineageBuilder {
         }
     }
 
-    fn normalize_ident(&self, ident: &Ident) -> String {
+    pub(crate) fn normalize_ident(&self, ident: &Ident) -> String {
         if self.normalize_case && ident.quote_style.is_none() {
             ident.value.to_lowercase()
         } else {

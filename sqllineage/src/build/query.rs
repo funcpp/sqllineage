@@ -1,9 +1,7 @@
 use sqlparser::ast::{Query, SetExpr};
 
 use crate::build::LineageBuilder;
-use crate::graph::edge::RawEdge;
-use crate::graph::node::NodeId;
-use crate::graph::scope::{Binding, ScopeKind};
+use crate::graph::scope::{Binding, OutputPlan, ScopeKind};
 
 impl LineageBuilder {
     pub(crate) fn visit_query(&mut self, query: &Query) {
@@ -39,7 +37,13 @@ impl LineageBuilder {
                 .scopes
                 .output_columns(self.current_scope)
                 .to_vec();
+            let body_scope = self.current_scope;
             self.pop_scope();
+            // The parent owns the query's public output. Keep the child plan
+            // intact and delegate through it after returning to the parent.
+            self.graph
+                .scopes
+                .set_output_plan(self.current_scope, OutputPlan::Delegate(body_scope));
             for col in body_outputs {
                 self.graph.scopes.add_output_column(self.current_scope, col);
             }
@@ -54,7 +58,7 @@ impl LineageBuilder {
             SetExpr::SetOperation { left, right, .. } => {
                 let left_scope = self.push_scope(ScopeKind::SetOperation);
                 self.visit_set_expr(left);
-                let left_outputs: Vec<(String, NodeId)> = self
+                let left_outputs: Vec<(String, crate::graph::node::NodeId)> = self
                     .graph
                     .scopes
                     .output_columns(left_scope)
@@ -65,39 +69,17 @@ impl LineageBuilder {
 
                 let right_scope = self.push_scope(ScopeKind::SetOperation);
                 self.visit_set_expr(right);
-                let right_outputs: Vec<(String, NodeId)> = self
-                    .graph
-                    .scopes
-                    .output_columns(right_scope)
-                    .iter()
-                    .map(|c| (c.name.clone(), c.node_id))
-                    .collect();
                 self.pop_scope();
 
                 let is_recursive = self.recursive_cte_name.is_some();
-
-                let pair_count = left_outputs.len().min(right_outputs.len());
-                for i in 0..pair_count {
-                    let left_out = left_outputs[i].1;
-                    let right_out = right_outputs[i].1;
-
-                    let redirected: Vec<(NodeId, _)> = self
-                        .graph
-                        .edges
-                        .iter()
-                        .filter(|e| e.to == right_out)
-                        .map(|e| (e.from, e.kind.clone()))
-                        .collect();
-
-                    for (from, kind) in redirected {
-                        self.graph.edges.push(RawEdge {
-                            from,
-                            to: left_out,
-                            kind,
-                            is_recursive_back_edge: is_recursive,
-                        });
-                    }
-                }
+                self.graph.scopes.set_output_plan(
+                    self.current_scope,
+                    OutputPlan::SetOperation {
+                        left: left_scope,
+                        right: right_scope,
+                        recursive: is_recursive,
+                    },
+                );
 
                 for (name, node_id) in &left_outputs {
                     self.graph.scopes.add_output_column(

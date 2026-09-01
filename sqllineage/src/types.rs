@@ -104,6 +104,13 @@ pub struct TableLineage {
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct ColumnLineage {
     pub mappings: Vec<ColumnMapping>,
+    /// Whether any `SELECT *` in the statement (including nested CTEs and
+    /// derived tables) could not be expanded with the supplied catalog.
+    ///
+    /// This is deliberately statement-wide: an unresolved star in a JOIN
+    /// branch still makes the statement's schema incomplete even when the
+    /// selected output happens to come from another relation.
+    pub has_unresolved_stars: bool,
 }
 
 /// One output column and the source columns it derives from.
@@ -119,16 +126,28 @@ pub struct ColumnMapping {
 
 /// Resolution state of a source column.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub enum ColumnOrigin {
     /// Fully resolved to a specific table and column.
     Concrete { table: TableRef, column: String },
-    /// Multiple candidate tables; catalog needed to disambiguate.
+    /// Multiple candidate tables. A non-empty `candidates` list means genuine
+    /// ambiguity between known tables and can be disambiguated by a catalog.
+    /// An empty list means the column could not be resolved to any known table;
+    /// catalog refinement is not attempted.
     Ambiguous {
         column: String,
         candidates: Vec<TableRef>,
     },
     /// `SELECT *` or `table.*`; catalog needed to expand.
     Wildcard { table: TableRef },
+    /// A named output was selected through an unexpanded star in a CTE or
+    /// derived table. The table is known, but the physical column cannot be
+    /// asserted to be concrete without schema metadata.
+    NamedWildcard { table: TableRef, column: String },
+    /// One side of a set operation contributes no column source (for example,
+    /// a literal projection). Kept alongside the other branch's origins so a
+    /// consumer cannot mistake partial lineage for complete lineage.
+    SourceFree { column: String },
     /// Derived via recursive CTE; base case sources only.
     Recursive { base_sources: Vec<ColumnOrigin> },
 }
@@ -195,6 +214,7 @@ impl Default for AnalyzeOptions {
 
 /// Supported SQL dialects (maps to sqlparser dialects).
 #[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
 pub enum Dialect {
     #[default]
     Generic,
@@ -205,9 +225,32 @@ pub enum Dialect {
     Databricks,
     Snowflake,
     BigQuery,
+    DuckDb,
+    Redshift,
+    /// Trino syntax is handled by sqlparser's generic dialect because the
+    /// pinned sqlparser release does not expose a dedicated Trino dialect.
+    Trino,
+    Spark,
+    ClickHouse,
+    SQLite,
+    /// Microsoft SQL Server / T-SQL.
+    MsSql,
 }
 
-/// Error returned when SQL parsing fails.
+impl Dialect {
+    /// Whether an unqualified relation alias can denote the complete row.
+    ///
+    /// `BigQuery` and PostgreSQL permit expressions such as `ARRAY_AGG(t)` when
+    /// `t` is a range-variable alias.  Such an expression is a row/record
+    /// value, not a physical column named after the alias.  The lineage API
+    /// has no whole-row origin, so callers must retain honest uncertainty
+    /// instead of fabricating a concrete `table.alias` source.
+    pub(crate) const fn supports_relation_alias_row_value(self) -> bool {
+        matches!(self, Self::BigQuery | Self::PostgreSql)
+    }
+}
+
+/// Error returned when SQL parsing or semantic validation fails.
 #[derive(Debug, Clone)]
 pub struct ParseError {
     pub message: String,
@@ -225,6 +268,7 @@ impl std::error::Error for ParseError {}
 pub trait CatalogProvider {
     /// Return the column names of a table. Used to expand `SELECT *`.
     fn list_columns(&self, table: &TableRef) -> Option<Vec<String>>;
-    /// Given a column name and candidate tables, return the owning table.
+    /// Given a column name and candidate tables, return the owning table. This
+    /// is only called with a non-empty candidate slice.
     fn resolve_column(&self, column: &str, candidates: &[TableRef]) -> Option<TableRef>;
 }

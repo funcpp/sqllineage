@@ -34,7 +34,7 @@ fn main() {
         Some(d) => d,
         None => {
             eprintln!(
-                "error: unknown dialect '{}'. valid: generic, ansi, postgresql, mysql, hive, databricks, snowflake, bigquery",
+                "error: unknown dialect '{}'. valid: generic, ansi, postgresql, mysql, hive, databricks, snowflake, bigquery, duckdb, redshift, trino, spark, clickhouse, sqlite, mssql/tsql",
                 cli.dialect
             );
             process::exit(1);
@@ -82,6 +82,13 @@ fn parse_dialect(s: &str) -> Option<Dialect> {
         "databricks" => Some(Dialect::Databricks),
         "snowflake" => Some(Dialect::Snowflake),
         "bigquery" => Some(Dialect::BigQuery),
+        "duckdb" | "duck_db" => Some(Dialect::DuckDb),
+        "redshift" => Some(Dialect::Redshift),
+        "trino" => Some(Dialect::Trino),
+        "spark" | "spark2" | "sparksql" => Some(Dialect::Spark),
+        "clickhouse" | "click_house" => Some(Dialect::ClickHouse),
+        "sqlite" => Some(Dialect::SQLite),
+        "mssql" | "ms_sql" | "tsql" | "t-sql" | "sqlserver" => Some(Dialect::MsSql),
         _ => None,
     }
 }
@@ -158,10 +165,13 @@ fn format_origin(origin: &ColumnOrigin) -> String {
         ColumnOrigin::Concrete { table, column } => format!("{table}.{column}"),
         ColumnOrigin::Ambiguous { column, .. } => format!("?{column}?"),
         ColumnOrigin::Wildcard { table } => format!("{table}.*"),
+        ColumnOrigin::NamedWildcard { table, column } => format!("{table}.*({column})"),
+        ColumnOrigin::SourceFree { column } => format!("<literal:{column}>"),
         ColumnOrigin::Recursive { base_sources } => {
             let inner: Vec<String> = base_sources.iter().map(format_origin).collect();
             format!("recursive({})", inner.join(", "))
         }
+        _ => "<unknown>".to_string(),
     }
 }
 
@@ -204,4 +214,25 @@ fn format_dot(result: &AnalyzeResult, columns: bool) -> String {
 
     out.push('}');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_dialect;
+    use sqllineage::Dialect;
+
+    #[test]
+    fn parses_added_dialects_and_tsql_aliases() {
+        assert!(matches!(parse_dialect("duckdb"), Some(Dialect::DuckDb)));
+        assert!(matches!(parse_dialect("redshift"), Some(Dialect::Redshift)));
+        assert!(matches!(parse_dialect("trino"), Some(Dialect::Trino)));
+        assert!(matches!(parse_dialect("spark"), Some(Dialect::Spark)));
+        assert!(matches!(
+            parse_dialect("clickhouse"),
+            Some(Dialect::ClickHouse)
+        ));
+        assert!(matches!(parse_dialect("sqlite"), Some(Dialect::SQLite)));
+        assert!(matches!(parse_dialect("tsql"), Some(Dialect::MsSql)));
+        assert!(parse_dialect("not-a-dialect").is_none());
+    }
 }

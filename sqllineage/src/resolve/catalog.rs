@@ -5,6 +5,7 @@ pub(crate) fn apply_catalog(mappings: &mut Vec<ColumnMapping>, catalog: &dyn Cat
     for mapping in mappings.iter_mut() {
         for source in &mut mapping.sources {
             if let ColumnOrigin::Ambiguous { column, candidates } = source
+                && !candidates.is_empty()
                 && let Some(owner) = catalog.resolve_column(column, candidates)
             {
                 *source = ColumnOrigin::Concrete {

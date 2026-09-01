@@ -1,10 +1,12 @@
 use sqlparser::ast::{
-    Expr, Ident, Select, SelectItem, SelectItemQualifiedWildcardKind, TableFactor, TableWithJoins,
+    Expr, ObjectName, Select, SelectItem, SelectItemQualifiedWildcardKind, TableFactor,
+    TableWithJoins, WildcardAdditionalOptions,
 };
 
 use crate::build::LineageBuilder;
 use crate::build::expr::determine_edge_kind;
-use crate::graph::scope::{Binding, ScopeColumn, ScopeKind};
+use crate::graph::node::{StarBase, StarColumnName, StarOptions, StarReplacement};
+use crate::graph::scope::{Binding, ScopeColumn, ScopeKind, VirtualColumn, VirtualColumnState};
 
 impl LineageBuilder {
     /// Process a SELECT — FROM first, then projection.
@@ -24,7 +26,7 @@ impl LineageBuilder {
                     let ancestors = self.collect_ancestors(expr);
                     let kind = determine_edge_kind(expr);
                     let name = infer_column_name(expr);
-                    let output = self.graph.add_output(name.clone());
+                    let output = self.graph.add_output(name.clone(), kind.clone());
                     for &anc in &ancestors {
                         self.graph.add_edge(anc, output, kind.clone());
                     }
@@ -40,7 +42,7 @@ impl LineageBuilder {
                     let ancestors = self.collect_ancestors(expr);
                     let kind = determine_edge_kind(expr);
                     let name = alias.value.clone();
-                    let output = self.graph.add_output(name.clone());
+                    let output = self.graph.add_output(name.clone(), kind.clone());
                     for &anc in &ancestors {
                         self.graph.add_edge(anc, output, kind.clone());
                     }
@@ -57,7 +59,7 @@ impl LineageBuilder {
                     let kind = determine_edge_kind(expr);
                     for alias in aliases {
                         let name = alias.value.clone();
-                        let output = self.graph.add_output(name.clone());
+                        let output = self.graph.add_output(name.clone(), kind.clone());
                         for &anc in &ancestors {
                             self.graph.add_edge(anc, output, kind.clone());
                         }
@@ -70,8 +72,13 @@ impl LineageBuilder {
                         );
                     }
                 }
-                SelectItem::Wildcard(_) => {
-                    let star = self.graph.add_star(None, self.current_scope);
+                SelectItem::Wildcard(options) => {
+                    let star_options = self.star_options(options);
+                    let star = self.graph.add_star(
+                        StarBase::Unqualified,
+                        star_options,
+                        self.current_scope,
+                    );
                     self.graph.scopes.add_output_column(
                         self.current_scope,
                         ScopeColumn {
@@ -80,21 +87,105 @@ impl LineageBuilder {
                         },
                     );
                 }
-                SelectItem::QualifiedWildcard(kind, _) => {
-                    if let SelectItemQualifiedWildcardKind::ObjectName(obj_name) = kind {
-                        let table = self.table_ref_from_object_name(obj_name);
-                        let star = self.graph.add_star(Some(table), self.current_scope);
-                        self.graph.scopes.add_output_column(
-                            self.current_scope,
-                            ScopeColumn {
-                                name: "*".to_string(),
-                                node_id: star,
-                            },
-                        );
-                    }
+                SelectItem::QualifiedWildcard(kind, options) => {
+                    let base = match kind {
+                        SelectItemQualifiedWildcardKind::ObjectName(obj_name) => {
+                            StarBase::Qualified(self.object_name_parts(obj_name))
+                        }
+                        SelectItemQualifiedWildcardKind::Expr(expr) => {
+                            StarBase::Expr(self.collect_ancestors(expr))
+                        }
+                    };
+                    let star_options = self.star_options(options);
+                    let star = self.graph.add_star(base, star_options, self.current_scope);
+                    self.graph.scopes.add_output_column(
+                        self.current_scope,
+                        ScopeColumn {
+                            name: "*".to_string(),
+                            node_id: star,
+                        },
+                    );
                 }
             }
         }
+    }
+
+    fn object_name_parts(&self, name: &ObjectName) -> Vec<String> {
+        name.0
+            .iter()
+            .map(|part| {
+                part.as_ident()
+                    .map_or_else(|| part.to_string(), |ident| self.normalize_ident(ident))
+            })
+            .collect()
+    }
+
+    fn star_options(&mut self, options: &WildcardAdditionalOptions) -> StarOptions {
+        let mut result = StarOptions {
+            ilike: options
+                .opt_ilike
+                .as_ref()
+                .map(|ilike| ilike.pattern.clone()),
+            ..StarOptions::default()
+        };
+
+        if let Some(exclude) = &options.opt_exclude {
+            result.exclude.extend(match exclude {
+                sqlparser::ast::ExcludeSelectItem::Single(name) => {
+                    vec![StarColumnName {
+                        parts: self.object_name_parts(name),
+                    }]
+                }
+                sqlparser::ast::ExcludeSelectItem::Multiple(names) => names
+                    .iter()
+                    .map(|name| StarColumnName {
+                        parts: self.object_name_parts(name),
+                    })
+                    .collect(),
+            });
+        }
+        if let Some(except) = &options.opt_except {
+            result.exclude.push(StarColumnName {
+                parts: vec![self.normalize_ident(&except.first_element)],
+            });
+            result.exclude.extend(
+                except
+                    .additional_elements
+                    .iter()
+                    .map(|ident| StarColumnName {
+                        parts: vec![self.normalize_ident(ident)],
+                    }),
+            );
+        }
+        if let Some(rename) = &options.opt_rename {
+            let entries = match rename {
+                sqlparser::ast::RenameSelectItem::Single(entry) => vec![entry],
+                sqlparser::ast::RenameSelectItem::Multiple(entries) => entries.iter().collect(),
+            };
+            result.rename.extend(entries.into_iter().map(|entry| {
+                (
+                    self.normalize_ident(&entry.ident),
+                    self.normalize_ident(&entry.alias),
+                )
+            }));
+        }
+        if let Some(replace) = &options.opt_replace {
+            for element in &replace.items {
+                let node_id = self.graph.add_output(
+                    "?wildcard-replace".to_string(),
+                    determine_edge_kind(&element.expr),
+                );
+                for ancestor in self.collect_ancestors(&element.expr) {
+                    self.graph
+                        .add_edge(ancestor, node_id, determine_edge_kind(&element.expr));
+                }
+                result.replace.push(StarReplacement {
+                    column: self.normalize_ident(&element.column_name),
+                    node_id,
+                });
+            }
+        }
+        result
     }
 
     /// Process FROM clause items (including JOINs).
@@ -167,9 +258,69 @@ impl LineageBuilder {
                 let _ = alias;
             }
 
+            TableFactor::UNNEST {
+                alias,
+                array_exprs,
+                with_offset,
+                with_offset_alias,
+                with_ordinality,
+            } => {
+                // The array expressions are evaluated in the scope visible
+                // before this FROM item is introduced. Capture their nodes
+                // first, then install the range-variable binding so it is
+                // visible to subsequent lateral FROM items and projection.
+                let dependencies = array_exprs
+                    .iter()
+                    .map(|expr| self.collect_ancestors(expr))
+                    .collect::<Vec<_>>();
+
+                let Some(alias) = alias else {
+                    return;
+                };
+
+                let mut columns = Vec::with_capacity(
+                    array_exprs.len() + usize::from(*with_offset) + usize::from(*with_ordinality),
+                );
+                for (index, deps) in dependencies.into_iter().enumerate() {
+                    let name = alias.columns.get(index).map_or_else(
+                        || alias.name.value.clone(),
+                        |column| column.name.value.clone(),
+                    );
+                    columns.push(VirtualColumn {
+                        name,
+                        state: if deps.is_empty() {
+                            VirtualColumnState::KnownEmpty
+                        } else {
+                            VirtualColumnState::Unknown
+                        },
+                        dependencies: deps,
+                    });
+                }
+                if *with_offset {
+                    columns.push(VirtualColumn {
+                        name: with_offset_alias
+                            .as_ref()
+                            .map_or_else(|| "offset".to_string(), |ident| ident.value.clone()),
+                        dependencies: Vec::new(),
+                        state: VirtualColumnState::KnownEmpty,
+                    });
+                } else if *with_ordinality {
+                    columns.push(VirtualColumn {
+                        name: "ordinality".to_string(),
+                        dependencies: Vec::new(),
+                        state: VirtualColumnState::KnownEmpty,
+                    });
+                }
+
+                let virtual_id = self
+                    .graph
+                    .scopes
+                    .add_virtual_source(self.current_scope, columns);
+                self.add_binding(alias.name.value.clone(), Binding::VirtualSource(virtual_id));
+            }
+
             TableFactor::TableFunction { .. }
             | TableFactor::Function { .. }
-            | TableFactor::UNNEST { .. }
             | TableFactor::JsonTable { .. }
             | TableFactor::OpenJsonTable { .. }
             | TableFactor::Pivot { .. }
@@ -192,16 +343,4 @@ fn infer_column_name(expr: &Expr) -> String {
         Expr::Cast { expr, .. } | Expr::Nested(expr) => infer_column_name(expr),
         _ => "?column?".to_string(),
     }
-}
-
-/// Split a compound identifier into (qualifier, `column_name`).
-pub(crate) fn split_compound(parts: &[Ident]) -> (String, String) {
-    let len = parts.len();
-    let column = parts[len - 1].value.clone();
-    let qualifier = parts[..len - 1]
-        .iter()
-        .map(|p| p.value.as_str())
-        .collect::<Vec<_>>()
-        .join(".");
-    (qualifier, column)
 }
