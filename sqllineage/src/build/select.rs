@@ -24,7 +24,7 @@ impl LineageBuilder {
                     let ancestors = self.collect_ancestors(expr);
                     let kind = determine_edge_kind(expr);
                     let name = infer_column_name(expr);
-                    let output = self.graph.add_output(name.clone());
+                    let output = self.graph.add_output(name.clone(), kind.clone());
                     for &anc in &ancestors {
                         self.graph.add_edge(anc, output, kind.clone());
                     }
@@ -40,7 +40,7 @@ impl LineageBuilder {
                     let ancestors = self.collect_ancestors(expr);
                     let kind = determine_edge_kind(expr);
                     let name = alias.value.clone();
-                    let output = self.graph.add_output(name.clone());
+                    let output = self.graph.add_output(name.clone(), kind.clone());
                     for &anc in &ancestors {
                         self.graph.add_edge(anc, output, kind.clone());
                     }
@@ -57,7 +57,7 @@ impl LineageBuilder {
                     let kind = determine_edge_kind(expr);
                     for alias in aliases {
                         let name = alias.value.clone();
-                        let output = self.graph.add_output(name.clone());
+                        let output = self.graph.add_output(name.clone(), kind.clone());
                         for &anc in &ancestors {
                             self.graph.add_edge(anc, output, kind.clone());
                         }

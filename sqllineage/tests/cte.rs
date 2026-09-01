@@ -16,6 +16,20 @@ fn single_cte() {
 }
 
 #[test]
+fn missing_column_from_cte_has_empty_ambiguous_candidates() {
+    let sql = "WITH cte AS (SELECT present FROM source) SELECT missing FROM cte";
+    let result = analyze_one(sql);
+    let m = find_mapping(&result.columns.mappings, "missing");
+    match &m.sources[0] {
+        ColumnOrigin::Ambiguous { column, candidates } => {
+            assert_eq!(column, "missing");
+            assert!(candidates.is_empty());
+        }
+        other => panic!("expected Ambiguous, got {other:?}"),
+    }
+}
+
+#[test]
 fn cte_chain() {
     let sql = "WITH a AS (SELECT x FROM t), b AS (SELECT x FROM a) SELECT x FROM b";
     let result = analyze_one(sql);

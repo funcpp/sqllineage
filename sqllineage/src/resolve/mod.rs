@@ -1,7 +1,7 @@
 mod catalog;
 mod topo;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::graph::RawGraph;
 use crate::graph::edge::EdgeKind;
@@ -53,18 +53,17 @@ pub(crate) fn resolve(
 
     let root = ScopeTree::root();
     let ordered_cols = graph.scopes.output_columns(root).to_vec();
-    let final_ids: HashSet<NodeId> = ordered_cols.iter().map(|c| c.node_id).collect();
-
     let output_table = graph.tables.output.clone();
     let mut mappings = Vec::new();
 
-    for &node_id in &final_ids {
+    for col in &ordered_cols {
+        let node_id = col.node_id;
         match &graph.nodes[node_id] {
             RawNode::Output { name, .. } => {
                 let mut visited = HashSet::new();
                 let (sources, edge_kinds, has_back) =
                     collect_output_sources(node_id, &graph, &mut resolved, &incoming, &mut visited);
-                let transform = derive_transform(&edge_kinds);
+                let transform = derive_transform(&graph.nodes[node_id], &edge_kinds);
 
                 if has_back {
                     mappings.push(ColumnMapping {
@@ -95,17 +94,6 @@ pub(crate) fn resolve(
             _ => {}
         }
     }
-
-    let name_order: HashMap<String, usize> = ordered_cols
-        .iter()
-        .enumerate()
-        .filter_map(|(i, c)| match &graph.nodes[c.node_id] {
-            RawNode::Output { name, .. } => Some((name.clone(), i)),
-            RawNode::Star { .. } => Some(("*".to_string(), i)),
-            _ => None,
-        })
-        .collect();
-    mappings.sort_by_key(|m| name_order.get(&m.target.column).copied().unwrap_or(usize::MAX));
 
     if let Some(cat) = catalog {
         catalog::apply_catalog(&mut mappings, cat);
@@ -195,7 +183,7 @@ fn expand_scope_columns(
             let mut visited = HashSet::new();
             let (sources, edge_kinds, _) =
                 collect_output_sources(col.node_id, graph, resolved, incoming, &mut visited);
-            let transform = derive_transform(&edge_kinds);
+            let transform = derive_transform(&graph.nodes[col.node_id], &edge_kinds);
             mappings.push(ColumnMapping {
                 target: ColumnRef {
                     table: output_table.cloned(),
@@ -397,9 +385,9 @@ fn resolve_from_bindings(
             }
         }
     } else if bindings.is_empty() {
-        Some(ColumnOrigin::Concrete {
-            table: TableRef::new("?unknown?"),
+        Some(ColumnOrigin::Ambiguous {
             column: name.to_string(),
+            candidates: Vec::new(),
         })
     } else {
         let mut table_candidates = Vec::new();
@@ -456,14 +444,23 @@ fn resolve_through_scope(
             origins.into_iter().next()
         }
     } else {
-        Some(ColumnOrigin::Concrete {
-            table: TableRef::new("?cte?"),
+        Some(ColumnOrigin::Ambiguous {
             column: column_name.to_string(),
+            candidates: Vec::new(),
         })
     }
 }
 
-fn derive_transform(kinds: &[EdgeKind]) -> TransformKind {
+fn derive_transform(node: &RawNode, edge_kinds: &[EdgeKind]) -> TransformKind {
+    let kinds = if edge_kinds.is_empty() {
+        match node {
+            RawNode::Output { intrinsic_kind, .. } => std::slice::from_ref(intrinsic_kind),
+            _ => edge_kinds,
+        }
+    } else {
+        edge_kinds
+    };
+
     if kinds.iter().any(|k| matches!(k, EdgeKind::ViaAggregation)) {
         TransformKind::Aggregation
     } else if kinds.iter().any(|k| matches!(k, EdgeKind::ViaConditional)) {
