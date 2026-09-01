@@ -1,7 +1,19 @@
 mod common;
 
 use common::{analyze_one, concrete_sources, find_mapping, table};
-use sqllineage::{ColumnOrigin, TableRef, TransformKind};
+use sqllineage::{ColumnMapping, ColumnOrigin, TableRef, TransformKind};
+
+fn has_wildcard_from(mapping: &ColumnMapping, table_name: &str) -> bool {
+    mapping.sources.iter().any(|source| {
+        match source {
+        ColumnOrigin::Wildcard { table } => table.table == table_name,
+        ColumnOrigin::Recursive { base_sources } => base_sources.iter().any(|source| {
+            matches!(source, ColumnOrigin::Wildcard { table } if table.table == table_name)
+        }),
+        _ => false,
+    }
+    })
+}
 
 #[test]
 fn single_cte() {
@@ -13,6 +25,20 @@ fn single_cte() {
     let m = find_mapping(&result.columns.mappings, "a");
     assert_eq!(concrete_sources(m), vec![("t".into(), "a".into())]);
     assert_eq!(m.transform, TransformKind::Direct);
+}
+
+#[test]
+fn missing_column_from_cte_has_empty_ambiguous_candidates() {
+    let sql = "WITH cte AS (SELECT present FROM source) SELECT missing FROM cte";
+    let result = analyze_one(sql);
+    let m = find_mapping(&result.columns.mappings, "missing");
+    match &m.sources[0] {
+        ColumnOrigin::Ambiguous { column, candidates } => {
+            assert_eq!(column, "missing");
+            assert!(candidates.is_empty());
+        }
+        other => panic!("expected Ambiguous, got {other:?}"),
+    }
 }
 
 #[test]
@@ -71,6 +97,12 @@ fn recursive_cte_base_case() {
     match &m.sources[0] {
         ColumnOrigin::Recursive { base_sources } => {
             assert!(!base_sources.is_empty());
+            assert!(base_sources.iter().all(|source| {
+                !matches!(
+                    source,
+                    ColumnOrigin::Concrete { table, .. } if table.table == "cte"
+                )
+            }));
             match &base_sources[0] {
                 ColumnOrigin::Concrete { table, column } => {
                     assert_eq!(table.table, "t");
@@ -148,6 +180,187 @@ fn union_all_columns() {
     assert_eq!(
         concrete_sources(m_b),
         vec![("t1".into(), "b".into()), ("t2".into(), "d".into())]
+    );
+}
+
+#[test]
+fn union_keeps_left_names_and_merges_explicit_columns_positionally() {
+    let sql = "SELECT a AS left_name, b AS second_name FROM t1 \
+               UNION ALL SELECT c AS right_name, d AS other_name FROM t2";
+    let result = analyze_one(sql);
+    assert_eq!(result.columns.mappings.len(), 2);
+    assert_eq!(result.columns.mappings[0].target.column, "left_name");
+    assert_eq!(result.columns.mappings[1].target.column, "second_name");
+    assert_eq!(
+        concrete_sources(&result.columns.mappings[0]),
+        vec![("t1".into(), "a".into()), ("t2".into(), "c".into())]
+    );
+    assert_eq!(
+        concrete_sources(&result.columns.mappings[1]),
+        vec![("t1".into(), "b".into()), ("t2".into(), "d".into())]
+    );
+}
+
+#[test]
+fn nested_union_preserves_outer_left_names_and_all_branch_sources() {
+    let sql = "SELECT a AS first_name FROM t1 \
+               UNION ALL SELECT b AS second_name FROM t2 \
+               UNION ALL SELECT c AS third_name FROM t3";
+    let result = analyze_one(sql);
+    assert_eq!(result.columns.mappings.len(), 1);
+    assert_eq!(result.columns.mappings[0].target.column, "first_name");
+    assert_eq!(
+        concrete_sources(&result.columns.mappings[0]),
+        vec![
+            ("t1".into(), "a".into()),
+            ("t2".into(), "b".into()),
+            ("t3".into(), "c".into())
+        ]
+    );
+}
+
+#[test]
+fn union_transform_prefers_aggregation_across_branches() {
+    let sql = "SELECT SUM(a) AS value FROM t1 UNION ALL SELECT b AS other_value FROM t2";
+    let result = analyze_one(sql);
+    assert_eq!(result.columns.mappings.len(), 1);
+    assert_eq!(result.columns.mappings[0].target.column, "value");
+    assert_eq!(
+        concrete_sources(&result.columns.mappings[0]),
+        vec![("t1".into(), "a".into()), ("t2".into(), "b".into())]
+    );
+    assert_eq!(
+        result.columns.mappings[0].transform,
+        TransformKind::Aggregation
+    );
+}
+
+#[test]
+fn unknown_leading_star_is_preserved_without_catalog() {
+    let result = analyze_one("SELECT * FROM unknown_left UNION ALL SELECT a, b FROM known");
+    assert_eq!(result.columns.mappings.len(), 3);
+    match &result.columns.mappings[0].sources[0] {
+        ColumnOrigin::Wildcard { table } => assert_eq!(table.table, "unknown_left"),
+        other => panic!("expected wildcard, got {other:?}"),
+    }
+    assert!(has_wildcard_from(
+        &result.columns.mappings[1],
+        "unknown_left"
+    ));
+    assert!(has_wildcard_from(
+        &result.columns.mappings[2],
+        "unknown_left"
+    ));
+}
+
+#[test]
+fn unknown_non_leading_star_does_not_drop_known_branch_columns() {
+    let result = analyze_one("SELECT id, * FROM unknown_left UNION ALL SELECT a, b, c FROM known");
+    assert_eq!(result.columns.mappings.len(), 4);
+    assert!(matches!(
+        result.columns.mappings[0].sources.as_slice(),
+        [ColumnOrigin::Concrete { .. }, ColumnOrigin::Concrete { .. }]
+    ));
+    match &result.columns.mappings[1].sources[0] {
+        ColumnOrigin::Wildcard { table } => assert_eq!(table.table, "unknown_left"),
+        other => panic!("expected wildcard, got {other:?}"),
+    }
+    assert!(has_wildcard_from(
+        &result.columns.mappings[2],
+        "unknown_left"
+    ));
+    assert!(has_wildcard_from(
+        &result.columns.mappings[3],
+        "unknown_left"
+    ));
+    assert_eq!(result.columns.mappings[2].target.column, "b");
+    assert_eq!(result.columns.mappings[3].target.column, "c");
+}
+
+#[test]
+fn unknown_right_star_marks_known_left_tail_as_unresolved() {
+    let result = analyze_one("SELECT a, b, c FROM known UNION ALL SELECT * FROM unknown_right");
+    assert_eq!(result.columns.mappings.len(), 4);
+    for mapping in &result.columns.mappings[..3] {
+        assert!(has_wildcard_from(mapping, "unknown_right"));
+    }
+}
+
+#[test]
+fn unknown_stars_on_both_set_branches_are_both_retained() {
+    let result = analyze_one("SELECT * FROM unknown_left UNION ALL SELECT * FROM unknown_right");
+    assert_eq!(result.columns.mappings.len(), 2);
+    for (mapping, table_name) in result
+        .columns
+        .mappings
+        .iter()
+        .zip(["unknown_left", "unknown_right"])
+    {
+        assert!(has_wildcard_from(mapping, table_name));
+        assert!(has_wildcard_from(
+            mapping,
+            if table_name == "unknown_left" {
+                "unknown_right"
+            } else {
+                "unknown_left"
+            }
+        ));
+    }
+}
+
+#[test]
+fn nested_unknown_set_keeps_every_branch_mapping() {
+    let result = analyze_one(
+        "SELECT * FROM unknown_left UNION ALL SELECT a FROM known UNION ALL SELECT * FROM unknown_right",
+    );
+    assert_eq!(result.columns.mappings.len(), 3);
+    assert!(matches!(
+        result.columns.mappings[0].sources[0],
+        ColumnOrigin::Wildcard { .. }
+    ));
+    assert!(matches!(
+        result.columns.mappings[2].sources[0],
+        ColumnOrigin::Wildcard { .. }
+    ));
+    assert!(has_wildcard_from(
+        &result.columns.mappings[1],
+        "unknown_left"
+    ));
+    assert!(has_wildcard_from(
+        &result.columns.mappings[1],
+        "unknown_right"
+    ));
+}
+
+#[test]
+fn leading_unknown_star_hides_nonleading_only_set_names() {
+    let result = analyze_one(
+        "SELECT * FROM unknown_source \
+         UNION ALL SELECT id, amt AS total FROM known_table \
+         UNION ALL SELECT id, fee FROM third_table",
+    );
+    let names = result
+        .columns
+        .mappings
+        .iter()
+        .map(|mapping| mapping.target.column.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["*", "id", "total"]);
+}
+
+#[test]
+fn exact_set_arity_mismatch_is_an_analysis_error() {
+    let result = sqllineage::analyze(
+        "SELECT a FROM t1 UNION ALL SELECT b, c FROM t2",
+        sqllineage::AnalyzeOptions::default(),
+    );
+    let error = match result {
+        Ok(_) => panic!("exact arity mismatch should not be truncated"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error.message,
+        "set operation arity mismatch: left has 1 columns, right has 2 columns"
     );
 }
 

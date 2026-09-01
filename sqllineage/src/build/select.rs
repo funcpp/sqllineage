@@ -1,10 +1,10 @@
 use sqlparser::ast::{
-    Expr, Ident, Select, SelectItem, SelectItemQualifiedWildcardKind, TableFactor, TableWithJoins,
+    Expr, Select, SelectItem, SelectItemQualifiedWildcardKind, TableFactor, TableWithJoins,
 };
 
 use crate::build::LineageBuilder;
 use crate::build::expr::determine_edge_kind;
-use crate::graph::scope::{Binding, ScopeColumn, ScopeKind};
+use crate::graph::scope::{Binding, ScopeColumn, ScopeKind, VirtualColumn, VirtualColumnState};
 
 impl LineageBuilder {
     /// Process a SELECT — FROM first, then projection.
@@ -24,7 +24,7 @@ impl LineageBuilder {
                     let ancestors = self.collect_ancestors(expr);
                     let kind = determine_edge_kind(expr);
                     let name = infer_column_name(expr);
-                    let output = self.graph.add_output(name.clone());
+                    let output = self.graph.add_output(name.clone(), kind.clone());
                     for &anc in &ancestors {
                         self.graph.add_edge(anc, output, kind.clone());
                     }
@@ -40,7 +40,7 @@ impl LineageBuilder {
                     let ancestors = self.collect_ancestors(expr);
                     let kind = determine_edge_kind(expr);
                     let name = alias.value.clone();
-                    let output = self.graph.add_output(name.clone());
+                    let output = self.graph.add_output(name.clone(), kind.clone());
                     for &anc in &ancestors {
                         self.graph.add_edge(anc, output, kind.clone());
                     }
@@ -57,7 +57,7 @@ impl LineageBuilder {
                     let kind = determine_edge_kind(expr);
                     for alias in aliases {
                         let name = alias.value.clone();
-                        let output = self.graph.add_output(name.clone());
+                        let output = self.graph.add_output(name.clone(), kind.clone());
                         for &anc in &ancestors {
                             self.graph.add_edge(anc, output, kind.clone());
                         }
@@ -167,9 +167,69 @@ impl LineageBuilder {
                 let _ = alias;
             }
 
+            TableFactor::UNNEST {
+                alias,
+                array_exprs,
+                with_offset,
+                with_offset_alias,
+                with_ordinality,
+            } => {
+                // The array expressions are evaluated in the scope visible
+                // before this FROM item is introduced. Capture their nodes
+                // first, then install the range-variable binding so it is
+                // visible to subsequent lateral FROM items and projection.
+                let dependencies = array_exprs
+                    .iter()
+                    .map(|expr| self.collect_ancestors(expr))
+                    .collect::<Vec<_>>();
+
+                let Some(alias) = alias else {
+                    return;
+                };
+
+                let mut columns = Vec::with_capacity(
+                    array_exprs.len() + usize::from(*with_offset) + usize::from(*with_ordinality),
+                );
+                for (index, deps) in dependencies.into_iter().enumerate() {
+                    let name = alias.columns.get(index).map_or_else(
+                        || alias.name.value.clone(),
+                        |column| column.name.value.clone(),
+                    );
+                    columns.push(VirtualColumn {
+                        name,
+                        state: if deps.is_empty() {
+                            VirtualColumnState::KnownEmpty
+                        } else {
+                            VirtualColumnState::Unknown
+                        },
+                        dependencies: deps,
+                    });
+                }
+                if *with_offset {
+                    columns.push(VirtualColumn {
+                        name: with_offset_alias
+                            .as_ref()
+                            .map_or_else(|| "offset".to_string(), |ident| ident.value.clone()),
+                        dependencies: Vec::new(),
+                        state: VirtualColumnState::KnownEmpty,
+                    });
+                } else if *with_ordinality {
+                    columns.push(VirtualColumn {
+                        name: "ordinality".to_string(),
+                        dependencies: Vec::new(),
+                        state: VirtualColumnState::KnownEmpty,
+                    });
+                }
+
+                let virtual_id = self
+                    .graph
+                    .scopes
+                    .add_virtual_source(self.current_scope, columns);
+                self.add_binding(alias.name.value.clone(), Binding::VirtualSource(virtual_id));
+            }
+
             TableFactor::TableFunction { .. }
             | TableFactor::Function { .. }
-            | TableFactor::UNNEST { .. }
             | TableFactor::JsonTable { .. }
             | TableFactor::OpenJsonTable { .. }
             | TableFactor::Pivot { .. }
@@ -192,16 +252,4 @@ fn infer_column_name(expr: &Expr) -> String {
         Expr::Cast { expr, .. } | Expr::Nested(expr) => infer_column_name(expr),
         _ => "?column?".to_string(),
     }
-}
-
-/// Split a compound identifier into (qualifier, `column_name`).
-pub(crate) fn split_compound(parts: &[Ident]) -> (String, String) {
-    let len = parts.len();
-    let column = parts[len - 1].value.clone();
-    let qualifier = parts[..len - 1]
-        .iter()
-        .map(|p| p.value.as_str())
-        .collect::<Vec<_>>()
-        .join(".");
-    (qualifier, column)
 }
