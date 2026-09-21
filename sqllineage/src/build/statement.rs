@@ -96,26 +96,33 @@ impl LineageBuilder {
 
                 for clause in &merge.clauses {
                     match &clause.action {
-                        MergeAction::Update(upd) => {
-                            for assignment in &upd.assignments {
-                                let col_name = assignment_target_name(&assignment.target);
-                                let ancestors = self.collect_ancestors(&assignment.value);
-                                let kind = determine_edge_kind(&assignment.value);
-                                let output = self.graph.add_output(col_name.clone());
-                                for &anc in &ancestors {
-                                    self.graph.add_edge(anc, output, kind.clone());
+                        MergeAction::Update(upd) => match &upd.kind {
+                            ast::MergeUpdateKind::Set(assignments) => {
+                                for assignment in assignments {
+                                    let col_name = assignment_target_name(&assignment.target);
+                                    let ancestors = self.collect_ancestors(&assignment.value);
+                                    let kind = determine_edge_kind(&assignment.value);
+                                    let output = self.graph.add_output(col_name.clone());
+                                    for &anc in &ancestors {
+                                        self.graph.add_edge(anc, output, kind.clone());
+                                    }
+                                    self.graph.scopes.add_output_column(
+                                        self.current_scope,
+                                        ScopeColumn {
+                                            name: col_name,
+                                            node_id: output,
+                                        },
+                                    );
                                 }
-                                self.graph.scopes.add_output_column(
-                                    self.current_scope,
-                                    ScopeColumn {
-                                        name: col_name,
-                                        node_id: output,
-                                    },
-                                );
                             }
-                        }
-                        MergeAction::Insert(ins) => {
-                            if let ast::MergeInsertKind::Values(values) = &ins.kind {
+                            ast::MergeUpdateKind::Wildcard => self.add_merge_source_star(),
+                        },
+                        MergeAction::Insert(ins) => match &ins.kind {
+                            ast::MergeInsertKind::Wildcard => self.add_merge_source_star(),
+                            // `INSERT ROW` also means "every source column", but it
+                            // predates this handling and is left as it was.
+                            ast::MergeInsertKind::Row => {}
+                            ast::MergeInsertKind::Values(values) => {
                                 let col_names: Vec<String> = ins
                                     .columns
                                     .iter()
@@ -148,8 +155,8 @@ impl LineageBuilder {
                                     }
                                 }
                             }
-                        }
-                        MergeAction::Delete { .. } => {}
+                        },
+                        MergeAction::Delete { .. } | MergeAction::DoNothing { .. } => {}
                     }
                 }
                 StatementType::Merge
@@ -168,6 +175,7 @@ impl LineageBuilder {
             | Statement::AlterSchema { .. }
             | Statement::AlterSession { .. }
             | Statement::AlterTable { .. }
+            | Statement::AlterTextSearch(_)
             | Statement::AlterType { .. }
             | Statement::AlterUser { .. }
             | Statement::AlterView { .. }
@@ -188,6 +196,7 @@ impl LineageBuilder {
             | Statement::CreateDatabase { .. }
             | Statement::CreateDomain { .. }
             | Statement::CreateExtension { .. }
+            | Statement::CreateFileFormat { .. }
             | Statement::CreateFunction { .. }
             | Statement::CreateIndex(_)
             | Statement::CreateMacro { .. }
@@ -202,11 +211,13 @@ impl LineageBuilder {
             | Statement::CreateSequence { .. }
             | Statement::CreateServer { .. }
             | Statement::CreateStage { .. }
+            | Statement::CreateTextSearch(_)
             | Statement::CreateTrigger { .. }
             | Statement::CreateType { .. }
             | Statement::CreateUser { .. }
             | Statement::CreateView { .. }
             | Statement::CreateVirtualTable { .. }
+            | Statement::CreateWarehouse { .. }
             | Statement::Deallocate { .. }
             | Statement::Declare { .. }
             | Statement::Deny { .. }
@@ -248,6 +259,7 @@ impl LineageBuilder {
             | Statement::Pragma { .. }
             | Statement::Prepare { .. }
             | Statement::Print(_)
+            | Statement::Put { .. }
             | Statement::RaisError { .. }
             | Statement::Raise { .. }
             | Statement::ReleaseSavepoint { .. }
@@ -286,6 +298,23 @@ impl LineageBuilder {
             | Statement::WaitFor { .. }
             | Statement::While { .. } => StatementType::Other,
         }
+    }
+
+    /// Record `MERGE ... UPDATE SET *` / `INSERT *`, which copy every column of
+    /// the source row into the target.
+    ///
+    /// The source is already bound in the current scope, so this is the same
+    /// `Star` node `SELECT *` produces — unexpanded without a catalog, and
+    /// expanded against the source's columns with one.
+    fn add_merge_source_star(&mut self) {
+        let star = self.graph.add_star(None, self.current_scope);
+        self.graph.scopes.add_output_column(
+            self.current_scope,
+            ScopeColumn {
+                name: "*".to_string(),
+                node_id: star,
+            },
+        );
     }
 
     pub(crate) fn scan_expr_for_tables(&mut self, expr: &ast::Expr) {
