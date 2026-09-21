@@ -122,7 +122,13 @@ Options:
   -h, --help               Print help
 ```
 
-Supported dialects: `generic`, `ansi`, `postgresql`, `mysql`, `hive`, `databricks`, `snowflake`, `bigquery`.
+Supported dialects — one per dialect that [sqlparser](https://crates.io/crates/sqlparser) exposes:
+
+`generic`, `ansi`, `postgresql`, `mysql`, `hive`, `databricks`, `snowflake`, `bigquery`, `duckdb`, `redshift`, `spark`, `clickhouse`, `sqlite`, `mssql`, `oracle`, `teradata`.
+
+The aliases `postgres`, `sparksql`, `tsql`, and `sqlserver` are also accepted. Names are case-insensitive.
+
+Dialects without a dedicated `sqlparser` implementation — Trino/Presto, for example — generally parse with `generic`, which accepts a superset of most grammars.
 
 ## CatalogProvider
 

@@ -267,7 +267,11 @@ impl sqllineage_core::CatalogProvider for PyCatalog {
 ///
 /// Args:
 ///     sql: One or more SQL statements (separated by `;`).
-///     dialect: SQL dialect name (default: "generic").
+///     dialect: SQL dialect name (default: "generic"). One of generic, ansi,
+///              postgresql, mysql, hive, databricks, snowflake, bigquery,
+///              duckdb, redshift, spark, clickhouse, sqlite, mssql, oracle,
+///              teradata; the aliases postgres, sparksql, tsql, and sqlserver
+///              are also accepted.
 ///     catalog: Optional object with `list_columns(table) -> list[str] | None`
 ///              and `resolve_column(column, candidates) -> TableRef | None`.
 ///     normalize_case: Lowercase unquoted identifiers (default: True).
@@ -282,21 +286,12 @@ fn analyze(
     catalog: Option<Py<PyAny>>,
     normalize_case: bool,
 ) -> PyResult<Vec<PyLineageResult>> {
-    let d = match dialect.to_lowercase().as_str() {
-        "generic" => sqllineage_core::Dialect::Generic,
-        "ansi" => sqllineage_core::Dialect::Ansi,
-        "postgresql" | "postgres" => sqllineage_core::Dialect::PostgreSql,
-        "mysql" => sqllineage_core::Dialect::MySql,
-        "hive" => sqllineage_core::Dialect::Hive,
-        "databricks" => sqllineage_core::Dialect::Databricks,
-        "snowflake" => sqllineage_core::Dialect::Snowflake,
-        "bigquery" => sqllineage_core::Dialect::BigQuery,
-        other => {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "unknown dialect: '{other}'"
-            )));
-        }
-    };
+    let d: sqllineage_core::Dialect =
+        dialect
+            .parse()
+            .map_err(|e: sqllineage_core::UnknownDialect| {
+                pyo3::exceptions::PyValueError::new_err(e.to_string())
+            })?;
 
     let catalog_box: Option<Box<dyn sqllineage_core::CatalogProvider>> =
         catalog.map(|obj| Box::new(PyCatalog { obj }) as Box<dyn sqllineage_core::CatalogProvider>);
