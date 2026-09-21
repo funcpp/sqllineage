@@ -24,7 +24,10 @@ impl LineageBuilder {
                 vec![node]
             }
 
-            Expr::Value(_) | Expr::TypedString { .. } | Expr::Wildcard(..) | Expr::QualifiedWildcard(..) => vec![],
+            Expr::Value(_)
+            | Expr::TypedString { .. }
+            | Expr::Wildcard(..)
+            | Expr::QualifiedWildcard(..) => vec![],
 
             Expr::Cast { expr, .. }
             | Expr::Nested(expr)
@@ -49,7 +52,12 @@ impl LineageBuilder {
 
             Expr::Extract { expr, .. } => self.collect_ancestors(expr),
 
-            Expr::Trim { expr, trim_what, trim_characters, .. } => {
+            Expr::Trim {
+                expr,
+                trim_what,
+                trim_characters,
+                ..
+            } => {
                 let mut v = self.collect_ancestors(expr);
                 if let Some(what) = trim_what {
                     v.extend(self.collect_ancestors(what));
@@ -62,7 +70,12 @@ impl LineageBuilder {
                 v
             }
 
-            Expr::Substring { expr, substring_from, substring_for, .. } => {
+            Expr::Substring {
+                expr,
+                substring_from,
+                substring_for,
+                ..
+            } => {
                 let mut v = self.collect_ancestors(expr);
                 if let Some(from) = substring_from {
                     v.extend(self.collect_ancestors(from));
@@ -73,7 +86,13 @@ impl LineageBuilder {
                 v
             }
 
-            Expr::Overlay { expr, overlay_what, overlay_from, overlay_for, .. } => {
+            Expr::Overlay {
+                expr,
+                overlay_what,
+                overlay_from,
+                overlay_for,
+                ..
+            } => {
                 let mut v = self.collect_ancestors(expr);
                 v.extend(self.collect_ancestors(overlay_what));
                 v.extend(self.collect_ancestors(overlay_from));
@@ -89,17 +108,36 @@ impl LineageBuilder {
                 v
             }
 
-            Expr::AtTimeZone { timestamp, time_zone } => {
+            Expr::AtTimeZone {
+                timestamp,
+                time_zone,
+            } => {
                 let mut v = self.collect_ancestors(timestamp);
                 v.extend(self.collect_ancestors(time_zone));
                 v
             }
 
             Expr::BinaryOp { left, right, .. }
-            | Expr::Like { expr: left, pattern: right, .. }
-            | Expr::ILike { expr: left, pattern: right, .. }
-            | Expr::SimilarTo { expr: left, pattern: right, .. }
-            | Expr::RLike { expr: left, pattern: right, .. }
+            | Expr::Like {
+                expr: left,
+                pattern: right,
+                ..
+            }
+            | Expr::ILike {
+                expr: left,
+                pattern: right,
+                ..
+            }
+            | Expr::SimilarTo {
+                expr: left,
+                pattern: right,
+                ..
+            }
+            | Expr::RLike {
+                expr: left,
+                pattern: right,
+                ..
+            }
             | Expr::IsDistinctFrom(left, right)
             | Expr::IsNotDistinctFrom(left, right) => {
                 let mut v = self.collect_ancestors(left);
@@ -113,7 +151,9 @@ impl LineageBuilder {
                 v
             }
 
-            Expr::InUnnest { expr, array_expr, .. } => {
+            Expr::InUnnest {
+                expr, array_expr, ..
+            } => {
                 let mut v = self.collect_ancestors(expr);
                 v.extend(self.collect_ancestors(array_expr));
                 v
@@ -192,7 +232,12 @@ impl LineageBuilder {
                 ancestors
             }
 
-            Expr::Case { operand, conditions, else_result, .. } => {
+            Expr::Case {
+                operand,
+                conditions,
+                else_result,
+                ..
+            } => {
                 let mut v = Vec::new();
                 if let Some(op) = operand {
                     v.extend(self.collect_ancestors(op));
@@ -229,7 +274,9 @@ impl LineageBuilder {
                 vec![]
             }
 
-            Expr::Between { expr, low, high, .. } => {
+            Expr::Between {
+                expr, low, high, ..
+            } => {
                 let mut v = self.collect_ancestors(expr);
                 v.extend(self.collect_ancestors(low));
                 v.extend(self.collect_ancestors(high));
@@ -251,7 +298,6 @@ impl LineageBuilder {
             | Expr::Interval(_)
             | Expr::Lambda(_)
             | Expr::MatchAgainst { .. } => vec![],
-
         }
     }
 }
