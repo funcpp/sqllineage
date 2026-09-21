@@ -128,3 +128,65 @@ fn catalog_preserves_qualified_columns() {
         vec![("orders".into(), "amount".into())]
     );
 }
+
+/// Answers `resolve_column` for any name, the way a catalog that looks columns
+/// up globally would.
+struct ByNameCatalog;
+
+impl CatalogProvider for ByNameCatalog {
+    fn list_columns(&self, _table: &TableRef) -> Option<Vec<String>> {
+        None
+    }
+
+    fn resolve_column(&self, _column: &str, _candidates: &[TableRef]) -> Option<TableRef> {
+        Some(TableRef::new("guessed"))
+    }
+}
+
+/// An unresolved column has no candidate relations, so there is nothing for a
+/// catalog to choose between. A catalog that answers by name alone must not be
+/// able to turn it into a concrete origin: a column existing somewhere in the
+/// catalog is not evidence that its table takes part in this query.
+#[test]
+fn catalog_cannot_give_an_unresolved_column_an_owner() {
+    for sql in [
+        "SELECT bare_col",
+        "WITH cte AS (SELECT present FROM source) SELECT bare_col FROM cte",
+    ] {
+        let result = analyze(
+            sql,
+            AnalyzeOptions {
+                catalog: Some(Box::new(ByNameCatalog)),
+                ..AnalyzeOptions::default()
+            },
+        )
+        .expect("parse")
+        .remove(0);
+
+        let m = find_mapping(&result.columns.mappings, "bare_col");
+        assert!(
+            matches!(&m.sources[..], [ColumnOrigin::Unresolved { .. }]),
+            "{sql}: got {:?}",
+            m.sources
+        );
+    }
+}
+
+/// The other side of the same boundary: genuine ambiguity between known tables
+/// is still the catalog's to resolve.
+#[test]
+fn catalog_still_resolves_genuine_ambiguity() {
+    let result = analyze(
+        "SELECT name FROM users JOIN orders ON users.id = orders.user_id",
+        opts_with_catalog(),
+    )
+    .expect("parse")
+    .remove(0);
+
+    let m = find_mapping(&result.columns.mappings, "name");
+    assert!(
+        matches!(&m.sources[..], [ColumnOrigin::Concrete { table, .. }] if table.table == "users"),
+        "got {:?}",
+        m.sources
+    );
+}

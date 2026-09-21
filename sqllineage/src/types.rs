@@ -118,15 +118,36 @@ pub struct ColumnMapping {
 }
 
 /// Resolution state of a source column.
+///
+/// The variants record how much was actually proven. Match exhaustively: a
+/// consumer that treats an unproven origin as proven is the failure this
+/// distinction exists to prevent.
 #[derive(Debug, Clone, Serialize)]
 pub enum ColumnOrigin {
     /// Fully resolved to a specific table and column.
     Concrete { table: TableRef, column: String },
-    /// Multiple candidate tables; catalog needed to disambiguate.
+    /// The column belongs to one of `candidates`, which relation is not
+    /// determined. A catalog can disambiguate it.
+    ///
+    /// `candidates` always holds at least two tables. A column that resolved
+    /// to exactly one table is [`Concrete`]; one that resolved to none is
+    /// [`Unresolved`].
+    ///
+    /// [`Concrete`]: ColumnOrigin::Concrete
+    /// [`Unresolved`]: ColumnOrigin::Unresolved
     Ambiguous {
         column: String,
         candidates: Vec<TableRef>,
     },
+    /// The column could not be traced to any relation in scope.
+    ///
+    /// This is not ambiguity between known tables — there is no candidate to
+    /// choose from, and a catalog is not consulted. It arises when no relation
+    /// is visible at all (`SELECT bare_col`), or when the CTE or derived table
+    /// the column was selected from has no output column of that name, which
+    /// happens both for a genuinely absent column and for one hidden behind an
+    /// unexpanded `SELECT *`.
+    Unresolved { column: String },
     /// `SELECT *` or `table.*`; catalog needed to expand.
     Wildcard { table: TableRef },
     /// Derived via recursive CTE; base case sources only.
@@ -358,5 +379,11 @@ pub trait CatalogProvider {
     /// Return the column names of a table. Used to expand `SELECT *`.
     fn list_columns(&self, table: &TableRef) -> Option<Vec<String>>;
     /// Given a column name and candidate tables, return the owning table.
+    ///
+    /// `candidates` always holds at least two tables — the relations the
+    /// column could have come from. Columns that resolved to no relation at
+    /// all are [`ColumnOrigin::Unresolved`] and are never passed here, because
+    /// a name existing somewhere in the catalog is not evidence that its table
+    /// takes part in this query.
     fn resolve_column(&self, column: &str, candidates: &[TableRef]) -> Option<TableRef>;
 }

@@ -1,7 +1,7 @@
 mod common;
 
 use common::{analyze_one, concrete_sources, find_mapping, table};
-use sqllineage::TransformKind;
+use sqllineage::{ColumnOrigin, TransformKind};
 
 #[test]
 fn select_columns() {
@@ -120,4 +120,36 @@ fn select_cast_passthrough() {
     let m = find_mapping(&result.columns.mappings, "a_int");
     assert_eq!(concrete_sources(m), vec![("t".into(), "a".into())]);
     assert_eq!(m.transform, TransformKind::Direct);
+}
+
+/// With no relation in scope there is nothing that could own the column, so
+/// the origin says so instead of naming a table.
+#[test]
+fn bare_column_without_any_relation_is_unresolved() {
+    let result = analyze_one("SELECT bare_col");
+    let m = find_mapping(&result.columns.mappings, "bare_col");
+    assert!(
+        matches!(&m.sources[..], [ColumnOrigin::Unresolved { column }] if column == "bare_col"),
+        "got {:?}",
+        m.sources
+    );
+}
+
+/// A set operation can mix a proven origin with an unresolved one in the same
+/// mapping, so completeness is a per-source question.
+#[test]
+fn proven_and_unresolved_sources_coexist_in_one_mapping() {
+    let result = analyze_one("SELECT a FROM t UNION ALL SELECT bare");
+    let m = find_mapping(&result.columns.mappings, "a");
+    assert!(
+        matches!(
+            &m.sources[..],
+            [
+                ColumnOrigin::Concrete { table, .. },
+                ColumnOrigin::Unresolved { column },
+            ] if table.table == "t" && column == "bare"
+        ),
+        "got {:?}",
+        m.sources
+    );
 }

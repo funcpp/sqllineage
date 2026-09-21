@@ -433,8 +433,8 @@ fn resolve_from_bindings(
             }
         }
     } else if bindings.is_empty() {
-        Some(ColumnOrigin::Concrete {
-            table: TableRef::new("?unknown?"),
+        // No relation is visible at all, so nothing can own this column.
+        Some(ColumnOrigin::Unresolved {
             column: name.to_string(),
         })
     } else {
@@ -454,7 +454,13 @@ fn resolve_from_bindings(
                 Binding::Table(t) => table_candidates.push(t.clone()),
             }
         }
-        if table_candidates.len() == 1 {
+        // Every binding was a CTE or derived table without this column, and no
+        // physical relation was left to attribute it to.
+        if table_candidates.is_empty() {
+            Some(ColumnOrigin::Unresolved {
+                column: name.to_string(),
+            })
+        } else if table_candidates.len() == 1 {
             Some(ColumnOrigin::Concrete {
                 table: table_candidates.into_iter().next().unwrap(),
                 column: name.to_string(),
@@ -497,8 +503,9 @@ fn resolve_through_scope(
             origins.into_iter().next()
         }
     } else {
-        Some(ColumnOrigin::Concrete {
-            table: TableRef::new("?cte?"),
+        // The scope is known but publishes no column of this name — either it
+        // genuinely has none, or an unexpanded `SELECT *` hides it.
+        Some(ColumnOrigin::Unresolved {
             column: column_name.to_string(),
         })
     }
