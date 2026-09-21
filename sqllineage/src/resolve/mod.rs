@@ -68,13 +68,21 @@ pub(crate) fn resolve(
 
                 if has_back {
                     mappings.push(ColumnMapping {
-                        target: ColumnRef { table: output_table.clone(), column: name.clone() },
-                        sources: vec![ColumnOrigin::Recursive { base_sources: sources }],
+                        target: ColumnRef {
+                            table: output_table.clone(),
+                            column: name.clone(),
+                        },
+                        sources: vec![ColumnOrigin::Recursive {
+                            base_sources: sources,
+                        }],
                         transform,
                     });
                 } else {
                     mappings.push(ColumnMapping {
-                        target: ColumnRef { table: output_table.clone(), column: name.clone() },
+                        target: ColumnRef {
+                            table: output_table.clone(),
+                            column: name.clone(),
+                        },
                         sources,
                         transform,
                     });
@@ -105,7 +113,12 @@ pub(crate) fn resolve(
             _ => None,
         })
         .collect();
-    mappings.sort_by_key(|m| name_order.get(&m.target.column).copied().unwrap_or(usize::MAX));
+    mappings.sort_by_key(|m| {
+        name_order
+            .get(&m.target.column)
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
 
     if let Some(cat) = catalog {
         catalog::apply_catalog(&mut mappings, cat);
@@ -156,7 +169,15 @@ fn expand_star(
     if let Some(t) = table {
         let binding = graph.scopes.lookup(scope, &t.table).cloned();
         if let Some(Binding::Cte(s) | Binding::DerivedTable(s)) = binding {
-            expand_scope_columns(s, graph, resolved, incoming, output_table, mappings, visited_scopes);
+            expand_scope_columns(
+                s,
+                graph,
+                resolved,
+                incoming,
+                output_table,
+                mappings,
+                visited_scopes,
+            );
         } else {
             mappings.push(wildcard_mapping(output_table, t.clone()));
         }
@@ -165,12 +186,28 @@ fn expand_star(
             match binding {
                 Binding::Table(tref) => mappings.push(wildcard_mapping(output_table, tref)),
                 Binding::Cte(s) | Binding::DerivedTable(s) => {
-                    expand_scope_columns(s, graph, resolved, incoming, output_table, mappings, visited_scopes);
+                    expand_scope_columns(
+                        s,
+                        graph,
+                        resolved,
+                        incoming,
+                        output_table,
+                        mappings,
+                        visited_scopes,
+                    );
                 }
             }
         }
         for &child in graph.scopes.anonymous_derived(scope) {
-            expand_scope_columns(child, graph, resolved, incoming, output_table, mappings, visited_scopes);
+            expand_scope_columns(
+                child,
+                graph,
+                resolved,
+                incoming,
+                output_table,
+                mappings,
+                visited_scopes,
+            );
         }
     }
 }
@@ -190,7 +227,16 @@ fn expand_scope_columns(
     }
     for col in graph.scopes.output_columns(scope_id) {
         if let RawNode::Star { table, scope } = &graph.nodes[col.node_id] {
-            expand_star(table.as_ref(), *scope, graph, resolved, incoming, output_table, mappings, visited_scopes);
+            expand_star(
+                table.as_ref(),
+                *scope,
+                graph,
+                resolved,
+                incoming,
+                output_table,
+                mappings,
+                visited_scopes,
+            );
         } else {
             let mut visited = HashSet::new();
             let (sources, edge_kinds, _) =
@@ -374,7 +420,14 @@ fn resolve_unqualified(
     incoming: &[Vec<usize>],
     visited: &mut HashSet<NodeId>,
 ) -> Option<ColumnOrigin> {
-    resolve_from_bindings(name, &effective_bindings(scope, graph), graph, resolved, incoming, visited)
+    resolve_from_bindings(
+        name,
+        &effective_bindings(scope, graph),
+        graph,
+        resolved,
+        incoming,
+        visited,
+    )
 }
 
 fn resolve_from_bindings(
@@ -406,7 +459,12 @@ fn resolve_from_bindings(
         for (_, binding) in bindings {
             match binding {
                 Binding::Cte(s) | Binding::DerivedTable(s) => {
-                    if graph.scopes.output_columns(*s).iter().any(|c| c.name == name) {
+                    if graph
+                        .scopes
+                        .output_columns(*s)
+                        .iter()
+                        .any(|c| c.name == name)
+                    {
                         return resolve_through_scope(name, *s, graph, resolved, incoming, visited);
                     }
                 }

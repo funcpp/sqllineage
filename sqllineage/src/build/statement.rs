@@ -280,7 +280,7 @@ impl LineageBuilder {
             | Statement::UNCache { .. }
             | Statement::UNLISTEN { .. }
             | Statement::Unload { .. }
-            | Statement::UnlockTables { .. }
+            | Statement::UnlockTables
             | Statement::Use(_)
             | Statement::Vacuum { .. }
             | Statement::WaitFor { .. }

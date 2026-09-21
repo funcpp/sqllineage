@@ -1,5 +1,7 @@
 # sqllineage
 
+[![CI](https://github.com/funcpp/sqllineage/actions/workflows/ci.yml/badge.svg)](https://github.com/funcpp/sqllineage/actions/workflows/ci.yml)
+
 Extract table-level and column-level data lineage from SQL statements.
 
 `sqllineage` parses SQL (via [sqlparser](https://crates.io/crates/sqlparser)) and produces a structured lineage result showing which tables are read/written and which source columns each output column derives from.
