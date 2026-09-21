@@ -55,6 +55,15 @@ table recursively. Star nodes go through the same chain via `expand_star()`.
 Every resolve path handles all three binding types (Table, Cte, DerivedTable)
 uniformly.
 
+A column that resolves to no relation at all becomes `Unresolved` rather than
+a `Concrete` origin naming an invented table. `Concrete` is a claim that the
+column really comes from that table, so the resolver only emits it once it has
+one. `Ambiguous` is reserved for a genuine choice between two or more known
+relations, which is the only case a `CatalogProvider` is asked to settle.
+`ColumnOrigin` is deliberately not `#[non_exhaustive]`: a consumer that starts
+silently ignoring a new resolution state is the failure the enum exists to
+prevent, so a new variant should break their build.
+
 `resolve/topo.rs` validates that the graph is a DAG after removing recursive
 CTE back-edges. `resolve/catalog.rs` applies the optional `CatalogProvider`
 as a post-processing step.

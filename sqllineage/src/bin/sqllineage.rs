@@ -140,6 +140,7 @@ fn format_origin(origin: &ColumnOrigin) -> String {
     match origin {
         ColumnOrigin::Concrete { table, column } => format!("{table}.{column}"),
         ColumnOrigin::Ambiguous { column, .. } => format!("?{column}?"),
+        ColumnOrigin::Unresolved { column } => format!("<unresolved:{column}>"),
         ColumnOrigin::Wildcard { table } => format!("{table}.*"),
         ColumnOrigin::Recursive { base_sources } => {
             let inner: Vec<String> = base_sources.iter().map(format_origin).collect();

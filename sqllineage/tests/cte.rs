@@ -255,3 +255,62 @@ fn cte_chain_select_star() {
     let m = find_mapping(&result.columns.mappings, "x");
     assert_eq!(concrete_sources(m), vec![("t".into(), "x".into())]);
 }
+
+fn only_source(sql: &str, column: &str) -> ColumnOrigin {
+    let result = analyze_one(sql);
+    let m = find_mapping(&result.columns.mappings, column);
+    assert_eq!(
+        m.sources.len(),
+        1,
+        "expected one source, got {:?}",
+        m.sources
+    );
+    m.sources[0].clone()
+}
+
+/// A CTE that has no output column of this name cannot be said to provide it.
+/// Three shapes reach the same state, and all three used to claim a fabricated
+/// `?cte?` table.
+#[test]
+fn column_absent_from_a_cte_is_unresolved() {
+    // The CTE genuinely has no such column.
+    let missing = only_source(
+        "WITH cte AS (SELECT present FROM source) SELECT missing FROM cte",
+        "missing",
+    );
+    assert!(
+        matches!(&missing, ColumnOrigin::Unresolved { column } if column == "missing"),
+        "got {missing:?}"
+    );
+
+    // Every binding is a CTE and none of them has the column, so no physical
+    // relation is left to attribute it to.
+    let two_ctes = only_source(
+        "WITH a AS (SELECT p FROM s1), b AS (SELECT q FROM s2) \
+         SELECT missing FROM a JOIN b ON a.p = b.q",
+        "missing",
+    );
+    assert!(
+        matches!(&two_ctes, ColumnOrigin::Unresolved { column } if column == "missing"),
+        "got {two_ctes:?}"
+    );
+}
+
+/// A column hidden behind an unexpanded `SELECT *` reads as unresolved too.
+///
+/// Here `p` very likely exists — the star just was not expanded. Reporting it
+/// as unresolved is honest but coarse; naming the relation it came from needs
+/// an origin that can carry one. Pinned so that change is visible when it lands.
+#[test]
+fn column_behind_an_unexpanded_star_is_unresolved() {
+    for sql in [
+        "WITH cte AS (SELECT * FROM t) SELECT p FROM cte",
+        "SELECT p FROM (SELECT * FROM t) d",
+    ] {
+        let origin = only_source(sql, "p");
+        assert!(
+            matches!(&origin, ColumnOrigin::Unresolved { column } if column == "p"),
+            "{sql}: got {origin:?}"
+        );
+    }
+}

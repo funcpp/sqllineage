@@ -16,8 +16,12 @@ class ColumnOrigin:
     """Resolution state of a source column.
 
     Check ``kind`` to determine the variant:
-    - ``"concrete"``: ``table`` and ``column`` are set.
-    - ``"ambiguous"``: ``column`` and ``candidates`` are set.
+    - ``"concrete"``: ``table`` and ``column`` are set. The only kind that
+      asserts the column really comes from that table.
+    - ``"ambiguous"``: ``column`` and ``candidates`` are set. ``candidates``
+      always holds at least two tables.
+    - ``"unresolved"``: ``column`` is set. The column could not be traced to
+      any relation in scope, so there is no table to name.
     - ``"wildcard"``: ``table`` is set.
     - ``"recursive"``: ``base_sources`` is set.
     """

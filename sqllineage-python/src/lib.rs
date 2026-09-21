@@ -115,6 +115,10 @@ impl PyColumnOrigin {
                 "ColumnOrigin.ambiguous({})",
                 self.column.as_deref().unwrap_or("?"),
             ),
+            "unresolved" => format!(
+                "ColumnOrigin.unresolved({})",
+                self.column.as_deref().unwrap_or("?"),
+            ),
             "recursive" => "ColumnOrigin.recursive(...)".to_string(),
             other => format!("ColumnOrigin.{other}(...)"),
         }
@@ -135,6 +139,13 @@ fn convert_origin(o: &sqllineage_core::ColumnOrigin) -> PyColumnOrigin {
             table: None,
             column: Some(column.clone()),
             candidates: Some(candidates.iter().map(PyTableRef::from).collect()),
+            base_sources: None,
+        },
+        sqllineage_core::ColumnOrigin::Unresolved { column } => PyColumnOrigin {
+            kind: "unresolved".into(),
+            table: None,
+            column: Some(column.clone()),
+            candidates: None,
             base_sources: None,
         },
         sqllineage_core::ColumnOrigin::Wildcard { table } => PyColumnOrigin {
