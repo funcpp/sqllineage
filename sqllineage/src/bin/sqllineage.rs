@@ -30,13 +30,10 @@ struct Cli {
 fn main() {
     let cli = Cli::parse();
 
-    let dialect = match parse_dialect(&cli.dialect) {
-        Some(d) => d,
-        None => {
-            eprintln!(
-                "error: unknown dialect '{}'. valid: generic, ansi, postgresql, mysql, hive, databricks, snowflake, bigquery",
-                cli.dialect
-            );
+    let dialect: Dialect = match cli.dialect.parse() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: {e}");
             process::exit(1);
         }
     };
@@ -69,20 +66,6 @@ fn main() {
             }
         };
         println!("{output}");
-    }
-}
-
-fn parse_dialect(s: &str) -> Option<Dialect> {
-    match s.to_lowercase().as_str() {
-        "generic" => Some(Dialect::Generic),
-        "ansi" => Some(Dialect::Ansi),
-        "postgresql" | "postgres" => Some(Dialect::PostgreSql),
-        "mysql" => Some(Dialect::MySql),
-        "hive" => Some(Dialect::Hive),
-        "databricks" => Some(Dialect::Databricks),
-        "snowflake" => Some(Dialect::Snowflake),
-        "bigquery" => Some(Dialect::BigQuery),
-        _ => None,
     }
 }
 

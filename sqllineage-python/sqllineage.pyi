@@ -53,7 +53,9 @@ def analyze(
     Args:
         sql: One or more SQL statements separated by ``;``.
         dialect: SQL dialect (generic, ansi, postgresql, mysql, hive,
-                 databricks, snowflake, bigquery).
+                 databricks, snowflake, bigquery, duckdb, redshift, spark,
+                 clickhouse, sqlite, mssql, oracle, teradata). Also accepts
+                 the aliases postgres, sparksql, tsql, and sqlserver.
         catalog: Optional object implementing ``list_columns(table: TableRef)
                  -> list[str] | None`` and ``resolve_column(column: str,
                  candidates: list[TableRef]) -> TableRef | None``.
