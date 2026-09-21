@@ -41,6 +41,7 @@ impl LineageBuilder {
             | Expr::IsUnknown(expr)
             | Expr::IsNotUnknown(expr)
             | Expr::IsNormalized { expr, .. }
+            | Expr::IsJson { expr, .. }
             | Expr::Collate { expr, .. }
             | Expr::Convert { expr, .. }
             | Expr::Ceil { expr, .. }

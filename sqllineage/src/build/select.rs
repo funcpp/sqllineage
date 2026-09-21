@@ -174,6 +174,7 @@ impl LineageBuilder {
             | TableFactor::OpenJsonTable { .. }
             | TableFactor::Pivot { .. }
             | TableFactor::Unpivot { .. }
+            | TableFactor::UnpivotExpr { .. }
             | TableFactor::MatchRecognize { .. }
             | TableFactor::XmlTable { .. }
             | TableFactor::SemanticView { .. } => {}

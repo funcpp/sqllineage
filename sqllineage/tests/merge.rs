@@ -1,7 +1,7 @@
 mod common;
 
 use common::{analyze_one, concrete_sources, find_mapping, table};
-use sqllineage::TransformKind;
+use sqllineage::{AnalyzeOptions, CatalogProvider, ColumnOrigin, TableRef, TransformKind, analyze};
 
 #[test]
 fn merge_when_matched_update_set() {
@@ -65,4 +65,63 @@ fn merge_both_clauses() {
         .filter(|m| m.target.column == "id")
         .collect();
     assert!(!id_mappings.is_empty(), "expected id from INSERT clause");
+}
+
+/// `UPDATE SET *` copies every source column; without a catalog the shape stays
+/// an unexpanded star rather than a guess at the column list.
+#[test]
+fn merge_update_set_wildcard_is_an_unexpanded_star() {
+    let sql = "\
+        MERGE INTO target t \
+        USING source s ON t.id = s.id \
+        WHEN MATCHED THEN UPDATE SET *";
+    let result = analyze_one(sql);
+    assert_eq!(result.tables.output, Some(table("target")));
+    assert_eq!(result.tables.inputs, vec![table("source")]);
+
+    let m = find_mapping(&result.columns.mappings, "*");
+    assert!(
+        matches!(&m.sources[..], [ColumnOrigin::Wildcard { table }] if table.table == "source"),
+        "expected a wildcard on source, got {:?}",
+        m.sources
+    );
+}
+
+struct SourceCatalog;
+
+impl CatalogProvider for SourceCatalog {
+    fn list_columns(&self, table: &TableRef) -> Option<Vec<String>> {
+        (table.table == "source").then(|| vec!["id".into(), "val".into()])
+    }
+
+    fn resolve_column(&self, _column: &str, _candidates: &[TableRef]) -> Option<TableRef> {
+        None
+    }
+}
+
+/// `INSERT *` resolves to the source's real columns once a catalog can name them.
+#[test]
+fn merge_insert_wildcard_expands_from_catalog() {
+    let sql = "\
+        MERGE INTO target t \
+        USING source s ON t.id = s.id \
+        WHEN NOT MATCHED THEN INSERT *";
+    let result = analyze(
+        sql,
+        AnalyzeOptions {
+            catalog: Some(Box::new(SourceCatalog)),
+            ..AnalyzeOptions::default()
+        },
+    )
+    .expect("MERGE should parse")
+    .remove(0);
+
+    let m_id = find_mapping(&result.columns.mappings, "id");
+    assert_eq!(concrete_sources(m_id), vec![("source".into(), "id".into())]);
+
+    let m_val = find_mapping(&result.columns.mappings, "val");
+    assert_eq!(
+        concrete_sources(m_val),
+        vec![("source".into(), "val".into())]
+    );
 }
