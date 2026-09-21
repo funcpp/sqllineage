@@ -194,7 +194,17 @@ impl Default for AnalyzeOptions {
 }
 
 /// Supported SQL dialects (maps to sqlparser dialects).
-#[derive(Debug, Clone, Copy, Default)]
+///
+/// Every dialect that the pinned `sqlparser` release exposes has a variant
+/// here. Parsing a statement with the closest dialect matters for lineage:
+/// `generic` accepts a superset of most grammars, but it does not apply
+/// dialect-specific rules such as `BigQuery`'s backtick quoting or T-SQL's
+/// bracket quoting.
+///
+/// Marked `#[non_exhaustive]`: `sqlparser` gains dialects over time, and
+/// adding one here should not be a breaking change for downstream matches.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Dialect {
     #[default]
     Generic,
@@ -205,7 +215,129 @@ pub enum Dialect {
     Databricks,
     Snowflake,
     BigQuery,
+    DuckDb,
+    Redshift,
+    Spark,
+    ClickHouse,
+    SQLite,
+    /// Microsoft SQL Server (T-SQL).
+    MsSql,
+    Oracle,
+    Teradata,
 }
+
+impl Dialect {
+    /// Every supported dialect, in the order used for help and error text.
+    pub const ALL: &'static [Self] = &[
+        Self::Generic,
+        Self::Ansi,
+        Self::PostgreSql,
+        Self::MySql,
+        Self::Hive,
+        Self::Databricks,
+        Self::Snowflake,
+        Self::BigQuery,
+        Self::DuckDb,
+        Self::Redshift,
+        Self::Spark,
+        Self::ClickHouse,
+        Self::SQLite,
+        Self::MsSql,
+        Self::Oracle,
+        Self::Teradata,
+    ];
+
+    /// The canonical lowercase name, as accepted by [`Dialect::from_str`] and
+    /// printed by [`Display`].
+    ///
+    /// [`Display`]: std::fmt::Display
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Generic => "generic",
+            Self::Ansi => "ansi",
+            Self::PostgreSql => "postgresql",
+            Self::MySql => "mysql",
+            Self::Hive => "hive",
+            Self::Databricks => "databricks",
+            Self::Snowflake => "snowflake",
+            Self::BigQuery => "bigquery",
+            Self::DuckDb => "duckdb",
+            Self::Redshift => "redshift",
+            Self::Spark => "spark",
+            Self::ClickHouse => "clickhouse",
+            Self::SQLite => "sqlite",
+            Self::MsSql => "mssql",
+            Self::Oracle => "oracle",
+            Self::Teradata => "teradata",
+        }
+    }
+
+    /// A comma-separated list of every canonical name, for help and error text.
+    pub fn names() -> String {
+        Self::ALL
+            .iter()
+            .map(|d| d.name())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+impl fmt::Display for Dialect {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl std::str::FromStr for Dialect {
+    type Err = UnknownDialect;
+
+    /// Parse a dialect name, case-insensitively.
+    ///
+    /// Accepts each canonical name from [`Dialect::name`] plus a few common
+    /// spellings: `postgres`, `sparksql`, `tsql`, and `sqlserver`.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "generic" => Ok(Self::Generic),
+            "ansi" => Ok(Self::Ansi),
+            "postgresql" | "postgres" => Ok(Self::PostgreSql),
+            "mysql" => Ok(Self::MySql),
+            "hive" => Ok(Self::Hive),
+            "databricks" => Ok(Self::Databricks),
+            "snowflake" => Ok(Self::Snowflake),
+            "bigquery" => Ok(Self::BigQuery),
+            "duckdb" => Ok(Self::DuckDb),
+            "redshift" => Ok(Self::Redshift),
+            "spark" | "sparksql" => Ok(Self::Spark),
+            "clickhouse" => Ok(Self::ClickHouse),
+            "sqlite" => Ok(Self::SQLite),
+            "mssql" | "tsql" | "sqlserver" => Ok(Self::MsSql),
+            "oracle" => Ok(Self::Oracle),
+            "teradata" => Ok(Self::Teradata),
+            _ => Err(UnknownDialect {
+                name: s.to_string(),
+            }),
+        }
+    }
+}
+
+/// Error returned when a dialect name is not recognized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownDialect {
+    pub name: String,
+}
+
+impl fmt::Display for UnknownDialect {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "unknown dialect '{}'. valid: {}",
+            self.name,
+            Dialect::names()
+        )
+    }
+}
+
+impl std::error::Error for UnknownDialect {}
 
 /// Error returned when SQL parsing fails.
 #[derive(Debug, Clone)]
