@@ -161,6 +161,13 @@ fn expand_star(
                 mappings,
                 visited_scopes,
             );
+        } else if let Some(Binding::Table(actual_table)) = binding {
+            // `t` is how the star was written, which for `SELECT a.* FROM
+            // real AS a` is the alias. The wildcard has to name the relation
+            // the alias stands for: the alias appears in no catalog and in no
+            // `tables.inputs`, so naming it here would both block expansion
+            // and claim a relation the table graph says does not exist.
+            mappings.push(wildcard_mapping(output_table, actual_table));
         } else {
             mappings.push(wildcard_mapping(output_table, t.clone()));
         }
