@@ -314,3 +314,34 @@ fn column_behind_an_unexpanded_star_is_unresolved() {
         );
     }
 }
+
+/// Known limitation: only the last hop classifies the column.
+///
+/// `collect_output_sources` records the kind of the *immediate* incoming edge
+/// and drops every kind met deeper in the walk, so an aggregate below a CTE or
+/// a derived table reads as `Direct`. The column's own kind does not rescue
+/// this — it describes the outer projection, which really is a plain
+/// reference; the aggregation is a hop further down and never travels.
+///
+/// Pinned so the change is visible when that lands.
+#[test]
+fn only_the_last_hop_classifies_the_column() {
+    for sql in [
+        "WITH x AS (SELECT COUNT(*) AS c FROM t) SELECT c FROM x",
+        "SELECT c FROM (SELECT COUNT(*) AS c FROM t) d",
+        // Not a question of missing sources: `t.x` survives the hop, the
+        // aggregation does not.
+        "SELECT c FROM (SELECT SUM(x) AS c FROM t) d",
+    ] {
+        let result = analyze_one(sql);
+        let m = find_mapping(&result.columns.mappings, "c");
+        assert_eq!(m.transform, TransformKind::Direct, "{sql}");
+    }
+
+    // Expanding a star takes no second hop — it classifies each inner column
+    // from that column's own node — so the same query disagrees with itself
+    // depending on how the column is selected.
+    let result = analyze_one("SELECT * FROM (SELECT COUNT(*) AS c FROM t) d");
+    let m = find_mapping(&result.columns.mappings, "c");
+    assert_eq!(m.transform, TransformKind::Aggregation);
+}

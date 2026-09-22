@@ -162,3 +162,56 @@ fn proven_and_unresolved_sources_coexist_in_one_mapping() {
         m.sources
     );
 }
+
+/// A source-free projection is classified by what the expression is, not by
+/// the fact that it has no ancestors. A literal really is a direct value; a
+/// function call or an operator is not.
+#[test]
+fn source_free_projections_are_classified_by_their_own_kind() {
+    for (sql, expected) in [
+        ("SELECT 1 AS c FROM t", TransformKind::Direct),
+        ("SELECT NULL AS c FROM t", TransformKind::Direct),
+        ("SELECT CAST(1 AS INT) AS c FROM t", TransformKind::Direct),
+        ("SELECT 1 + 2 AS c FROM t", TransformKind::Expression),
+        ("SELECT NOW() AS c FROM t", TransformKind::Expression),
+        ("SELECT COUNT(1) AS c FROM t", TransformKind::Aggregation),
+        (
+            "SELECT CASE WHEN 1 = 1 THEN 2 ELSE 3 END AS c FROM t",
+            TransformKind::Conditional,
+        ),
+    ] {
+        let result = analyze_one(sql);
+        let m = find_mapping(&result.columns.mappings, "c");
+        assert!(m.sources.is_empty(), "{sql}: expected no sources");
+        assert_eq!(m.transform, expected, "{sql}");
+    }
+}
+
+/// A set operation classifies the column from every branch, including one that
+/// reached no source and so left no edge behind — the branch's own kind still
+/// counts.
+#[test]
+fn a_set_operation_is_classified_by_every_branch() {
+    for (sql, expected) in [
+        (
+            "SELECT COUNT(*) AS c FROM t UNION ALL SELECT a FROM u",
+            TransformKind::Aggregation,
+        ),
+        (
+            "SELECT a AS c FROM t UNION ALL SELECT SUM(b) FROM u",
+            TransformKind::Aggregation,
+        ),
+        (
+            "SELECT a AS c FROM t UNION ALL SELECT b + 1 FROM u",
+            TransformKind::Expression,
+        ),
+        (
+            "SELECT a AS c FROM t UNION ALL SELECT b FROM u",
+            TransformKind::Direct,
+        ),
+    ] {
+        let result = analyze_one(sql);
+        let m = find_mapping(&result.columns.mappings, "c");
+        assert_eq!(m.transform, expected, "{sql}");
+    }
+}
