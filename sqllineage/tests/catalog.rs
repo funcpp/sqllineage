@@ -80,6 +80,43 @@ fn select_star_without_catalog_preserved() {
     }
 }
 
+/// A star written on an alias names the relation the alias stands for. The
+/// alias itself appears in no catalog and in no `tables.inputs`, so naming it
+/// would both block expansion and claim a relation that does not exist.
+#[test]
+fn qualified_alias_star_names_the_aliased_relation() {
+    let result = analyze("SELECT u.* FROM users AS u", AnalyzeOptions::default())
+        .expect("parse")
+        .into_iter()
+        .next()
+        .unwrap();
+    assert_eq!(result.columns.mappings.len(), 1);
+    match &result.columns.mappings[0].sources[0] {
+        ColumnOrigin::Wildcard { table } => assert_eq!(table.table, "users"),
+        other => panic!("expected Wildcard, got {other:?}"),
+    }
+}
+
+#[test]
+fn qualified_alias_star_expands_from_catalog() {
+    for sql in [
+        "SELECT u.* FROM users AS u",
+        "WITH x AS (SELECT u.* FROM users AS u) SELECT * FROM x",
+    ] {
+        let result = analyze(sql, opts_with_catalog())
+            .expect("parse")
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(result.columns.mappings.len(), 3, "{sql}");
+        assert_eq!(
+            concrete_sources(find_mapping(&result.columns.mappings, "email")),
+            vec![("users".into(), "email".into())],
+            "{sql}"
+        );
+    }
+}
+
 #[test]
 fn ambiguous_column_resolved_by_catalog() {
     let sql = "SELECT name FROM users JOIN orders ON users.id = orders.user_id";
