@@ -3,7 +3,7 @@ use sqlparser::ast::{
 };
 
 use crate::build::LineageBuilder;
-use crate::build::expr::determine_edge_kind;
+use crate::build::expr::classify_expr;
 use crate::graph::scope::{Binding, ScopeColumn, ScopeKind};
 
 impl LineageBuilder {
@@ -22,9 +22,9 @@ impl LineageBuilder {
             match item {
                 SelectItem::UnnamedExpr(expr) => {
                     let ancestors = self.collect_ancestors(expr);
-                    let kind = determine_edge_kind(expr);
+                    let kind = classify_expr(expr);
                     let name = infer_column_name(expr);
-                    let output = self.graph.add_output(name.clone());
+                    let output = self.graph.add_output(name.clone(), kind.clone());
                     for &anc in &ancestors {
                         self.graph.add_edge(anc, output, kind.clone());
                     }
@@ -38,9 +38,9 @@ impl LineageBuilder {
                 }
                 SelectItem::ExprWithAlias { expr, alias } => {
                     let ancestors = self.collect_ancestors(expr);
-                    let kind = determine_edge_kind(expr);
+                    let kind = classify_expr(expr);
                     let name = alias.value.clone();
-                    let output = self.graph.add_output(name.clone());
+                    let output = self.graph.add_output(name.clone(), kind.clone());
                     for &anc in &ancestors {
                         self.graph.add_edge(anc, output, kind.clone());
                     }
@@ -54,10 +54,10 @@ impl LineageBuilder {
                 }
                 SelectItem::ExprWithAliases { expr, aliases } => {
                     let ancestors = self.collect_ancestors(expr);
-                    let kind = determine_edge_kind(expr);
+                    let kind = classify_expr(expr);
                     for alias in aliases {
                         let name = alias.value.clone();
-                        let output = self.graph.add_output(name.clone());
+                        let output = self.graph.add_output(name.clone(), kind.clone());
                         for &anc in &ancestors {
                             self.graph.add_edge(anc, output, kind.clone());
                         }

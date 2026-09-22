@@ -1,7 +1,7 @@
 use sqlparser::ast::{self, AssignmentTarget, FunctionArguments, Ident, MergeAction, Statement};
 
 use crate::build::LineageBuilder;
-use crate::build::expr::determine_edge_kind;
+use crate::build::expr::classify_expr;
 use crate::graph::scope::ScopeColumn;
 use crate::types::{StatementType, TableRef};
 
@@ -49,8 +49,8 @@ impl LineageBuilder {
                 for assignment in &update.assignments {
                     let col_name = assignment_target_name(&assignment.target);
                     let ancestors = self.collect_ancestors(&assignment.value);
-                    let kind = determine_edge_kind(&assignment.value);
-                    let output = self.graph.add_output(col_name.clone());
+                    let kind = classify_expr(&assignment.value);
+                    let output = self.graph.add_output(col_name.clone(), kind.clone());
                     for &anc in &ancestors {
                         self.graph.add_edge(anc, output, kind.clone());
                     }
@@ -101,8 +101,9 @@ impl LineageBuilder {
                                 for assignment in assignments {
                                     let col_name = assignment_target_name(&assignment.target);
                                     let ancestors = self.collect_ancestors(&assignment.value);
-                                    let kind = determine_edge_kind(&assignment.value);
-                                    let output = self.graph.add_output(col_name.clone());
+                                    let kind = classify_expr(&assignment.value);
+                                    let output =
+                                        self.graph.add_output(col_name.clone(), kind.clone());
                                     for &anc in &ancestors {
                                         self.graph.add_edge(anc, output, kind.clone());
                                     }
@@ -140,8 +141,9 @@ impl LineageBuilder {
                                             .cloned()
                                             .unwrap_or_else(|| format!("col{i}"));
                                         let ancestors = self.collect_ancestors(expr);
-                                        let kind = determine_edge_kind(expr);
-                                        let output = self.graph.add_output(col_name.clone());
+                                        let kind = classify_expr(expr);
+                                        let output =
+                                            self.graph.add_output(col_name.clone(), kind.clone());
                                         for &anc in &ancestors {
                                             self.graph.add_edge(anc, output, kind.clone());
                                         }

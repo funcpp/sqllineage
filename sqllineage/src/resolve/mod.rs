@@ -59,11 +59,11 @@ pub(crate) fn resolve(
     for col in &ordered_cols {
         let node_id = col.node_id;
         match &graph.nodes[node_id] {
-            RawNode::Output { name, .. } => {
+            RawNode::Output { name, kind } => {
                 let mut visited = HashSet::new();
                 let (sources, edge_kinds, has_back) =
                     collect_output_sources(node_id, &graph, &mut resolved, &incoming, &mut visited);
-                let transform = derive_transform(&edge_kinds);
+                let transform = derive_transform(kind, &edge_kinds);
 
                 if has_back {
                     mappings.push(ColumnMapping {
@@ -209,8 +209,8 @@ fn expand_scope_columns(
         return;
     }
     for col in graph.scopes.output_columns(scope_id) {
-        if let RawNode::Star { table, scope } = &graph.nodes[col.node_id] {
-            expand_star(
+        match &graph.nodes[col.node_id] {
+            RawNode::Star { table, scope } => expand_star(
                 table.as_ref(),
                 *scope,
                 graph,
@@ -219,20 +219,22 @@ fn expand_scope_columns(
                 output_table,
                 mappings,
                 visited_scopes,
-            );
-        } else {
-            let mut visited = HashSet::new();
-            let (sources, edge_kinds, _) =
-                collect_output_sources(col.node_id, graph, resolved, incoming, &mut visited);
-            let transform = derive_transform(&edge_kinds);
-            mappings.push(ColumnMapping {
-                target: ColumnRef {
-                    table: output_table.cloned(),
-                    column: col.name.clone(),
-                },
-                sources,
-                transform,
-            });
+            ),
+            RawNode::Output { kind, .. } => {
+                let mut visited = HashSet::new();
+                let (sources, edge_kinds, _) =
+                    collect_output_sources(col.node_id, graph, resolved, incoming, &mut visited);
+                let transform = derive_transform(kind, &edge_kinds);
+                mappings.push(ColumnMapping {
+                    target: ColumnRef {
+                        table: output_table.cloned(),
+                        column: col.name.clone(),
+                    },
+                    sources,
+                    transform,
+                });
+            }
+            _ => {}
         }
     }
 }
@@ -511,12 +513,22 @@ fn resolve_through_scope(
     }
 }
 
-fn derive_transform(kinds: &[EdgeKind]) -> TransformKind {
-    if kinds.iter().any(|k| matches!(k, EdgeKind::ViaAggregation)) {
+/// Classify a column from its own kind together with the kinds of the edges
+/// that reached a source.
+///
+/// The two normally say the same thing — a projection stamps one kind on
+/// itself and on every edge it draws. They differ at a set operation, where
+/// the edges redirected from the other branch carry that branch's kind, and
+/// wherever a branch reached no source at all and so left no edge behind.
+/// Both have to count, so this is a union and not a preference.
+fn derive_transform(own_kind: &EdgeKind, edge_kinds: &[EdgeKind]) -> TransformKind {
+    let has = |probe: fn(&EdgeKind) -> bool| probe(own_kind) || edge_kinds.iter().any(probe);
+
+    if has(|k| matches!(k, EdgeKind::ViaAggregation)) {
         TransformKind::Aggregation
-    } else if kinds.iter().any(|k| matches!(k, EdgeKind::ViaConditional)) {
+    } else if has(|k| matches!(k, EdgeKind::ViaConditional)) {
         TransformKind::Conditional
-    } else if kinds.iter().any(|k| matches!(k, EdgeKind::ViaExpression)) {
+    } else if has(|k| matches!(k, EdgeKind::ViaExpression)) {
         TransformKind::Expression
     } else {
         TransformKind::Direct
