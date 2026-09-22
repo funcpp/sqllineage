@@ -303,7 +303,11 @@ impl LineageBuilder {
     }
 }
 
-pub(crate) fn determine_edge_kind(expr: &Expr) -> EdgeKind {
+/// Classify what an expression does to the values it reads.
+///
+/// The answer is stamped on the output column it defines and on every edge it
+/// draws to an ancestor, so it survives an expression that reads no column.
+pub(crate) fn classify_expr(expr: &Expr) -> EdgeKind {
     match expr {
         Expr::Identifier(_) | Expr::CompoundIdentifier(_) | Expr::Value(_) => EdgeKind::Direct,
         Expr::Function(f) => {
@@ -317,7 +321,7 @@ pub(crate) fn determine_edge_kind(expr: &Expr) -> EdgeKind {
         }
         Expr::Case { .. } => EdgeKind::ViaConditional,
         Expr::Cast { expr, .. } | Expr::Nested(expr) | Expr::Collate { expr, .. } => {
-            determine_edge_kind(expr)
+            classify_expr(expr)
         }
         _ => EdgeKind::ViaExpression,
     }

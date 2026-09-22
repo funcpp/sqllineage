@@ -31,11 +31,8 @@ impl RawGraph {
         id
     }
 
-    pub fn add_output(&mut self, name: String, intrinsic_kind: EdgeKind) -> NodeId {
-        self.add_node(RawNode::Output {
-            name,
-            intrinsic_kind,
-        })
+    pub fn add_output(&mut self, name: String, kind: EdgeKind) -> NodeId {
+        self.add_node(RawNode::Output { name, kind })
     }
 
     pub fn add_ref(&mut self, name: String, qualifier: Option<String>, scope: ScopeId) -> NodeId {
