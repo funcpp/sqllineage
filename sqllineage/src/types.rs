@@ -222,10 +222,11 @@ impl Default for AnalyzeOptions {
 /// dialect-specific rules such as `BigQuery`'s backtick quoting or T-SQL's
 /// bracket quoting.
 ///
-/// Marked `#[non_exhaustive]`: `sqlparser` gains dialects over time, and
-/// adding one here should not be a breaking change for downstream matches.
+/// Exhaustive on purpose. `sqlparser` gains dialects over time and each one
+/// added here breaks a downstream match, which is the point: a consumer that
+/// maps dialects to its own vocabulary should be told about a new one rather
+/// than route it silently through a `_` arm.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub enum Dialect {
     #[default]
     Generic,

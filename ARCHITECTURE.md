@@ -60,9 +60,12 @@ a `Concrete` origin naming an invented table. `Concrete` is a claim that the
 column really comes from that table, so the resolver only emits it once it has
 one. `Ambiguous` is reserved for a genuine choice between two or more known
 relations, which is the only case a `CatalogProvider` is asked to settle.
-`ColumnOrigin` is deliberately not `#[non_exhaustive]`: a consumer that starts
-silently ignoring a new resolution state is the failure the enum exists to
-prevent, so a new variant should break their build.
+No public enum is `#[non_exhaustive]`. A consumer that starts silently
+ignoring a new `ColumnOrigin` is the failure that enum exists to prevent, and
+the same reasoning holds for the rest: while the crate is pre-1.0, a variant
+that changes what a consumer should do is worth a compile error rather than a
+`_` arm that swallows it. This matches the rule for sqlparser AST variants
+above.
 
 `resolve/topo.rs` validates that the graph is a DAG after removing recursive
 CTE back-edges. `resolve/catalog.rs` applies the optional `CatalogProvider`
